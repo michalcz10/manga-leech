@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import io
 import http.cookiejar
+import http.client
 import logging
 import re
 import sys
@@ -15,8 +16,9 @@ import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, wait, FIRST_COMPLETED
 from decimal import Decimal
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -161,6 +163,28 @@ class Client:
         self.user_agent = user_agent
         self.cookies = http.cookiejar.CookieJar()
         self.local = threading.local()
+        self.cooldown_lock = threading.Lock()
+        self.cooldowns = {}
+
+    def wait_for_host(self, host):
+        while True:
+            with self.cooldown_lock:
+                remaining = self.cooldowns.get(host, 0) - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(remaining, 1))
+
+    def retry_delay(self, headers, fallback):
+        value = headers.get("Retry-After") if headers else None
+        if value:
+            try:
+                return max(0, float(value))
+            except ValueError:
+                try:
+                    return max(0, parsedate_to_datetime(value).timestamp() - time.time())
+                except (ValueError, TypeError, OverflowError):
+                    pass
+        return fallback
 
     def thread_opener(self):
         # Handler state is per thread; CookieJar synchronizes access internally.
@@ -174,16 +198,45 @@ class Client:
         headers = {"User-Agent": self.user_agent, "Accept": "*/*"}
         if referer:
             headers["Referer"] = referer
+        host = urlparse(http_url(url)).netloc
         for attempt in range(3):
+            self.wait_for_host(host)
             time.sleep(self.delay)
             try:
-                with self.thread_opener().open(urllib.request.Request(http_url(url), headers=headers), timeout=self.timeout) as response:
-                    return response.read()
+                started = time.monotonic()
+                # Socket timeout alone does not bound a slowly trickling response.
+                with self.thread_opener().open(urllib.request.Request(url, headers=headers), timeout=min(10, self.timeout)) as response:
+                    chunks = []
+                    received = 0
+                    while True:
+                        if time.monotonic() - started >= self.timeout:
+                            raise TimeoutError(f"Prekrocen cas celeho prenosu {self.timeout:g} s ({received} bajtu)")
+                        chunk = response.read1(64 * 1024)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        received += len(chunk)
+                    expected = response.headers.get("Content-Length")
+                    if expected is not None and received != int(expected):
+                        raise http.client.IncompleteRead(b"", int(expected) - received)
+                    return b"".join(chunks)
             except urllib.error.HTTPError as exc:
-                if exc.code not in {429, 500, 502, 503, 504} or attempt == 2:
+                status = exc.code
+                pause = self.retry_delay(exc.headers, 2 ** (attempt + 1))
+                exc.close()
+                LOG.warning("HTTP %d: %s (pokus %d/3)", status, url, attempt + 1)
+                if status not in {429, 500, 502, 503, 504} or attempt == 2:
                     raise
-                time.sleep(2 ** (attempt + 1))
-            except (OSError, TimeoutError):
+                if status in {429, 503}:
+                    if pause > 120:
+                        LOG.error("Server pozaduje pauzu %.0f s; kapitola selze misto dlouheho cekani. Zkuste pozdeji.", pause)
+                        raise
+                    with self.cooldown_lock:
+                        self.cooldowns[host] = max(self.cooldowns.get(host, 0), time.monotonic() + pause)
+                LOG.warning("Opakuji za %.1f s: %s", pause, url)
+                time.sleep(pause)
+            except (OSError, TimeoutError, http.client.HTTPException) as exc:
+                LOG.warning("Chyba prenosu: %s; %s (pokus %d/3)", exc, url, attempt + 1)
                 if attempt == 2:
                     raise
                 time.sleep(2 ** (attempt + 1))
@@ -296,10 +349,21 @@ def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="image") as executor:
         pending = {executor.submit(download_image, index, url): index for index, url in enumerate(urls, 1)}
         try:
-            for completed, future in enumerate(as_completed(pending), 1):
-                index = pending[future]
-                paths[index - 1] = future.result()
-                LOG.info("%s: hotovo %d/%d (obrazek %d)", chapter.title, completed, len(urls), index)
+            completed = 0
+            remaining = set(pending)
+            while remaining:
+                done, remaining = wait(remaining, timeout=10, return_when=FIRST_COMPLETED)
+                if not done:
+                    indices = sorted(pending[f] for f in remaining)
+                    LOG.warning("%s: stale cekam na %d obrazku; cisla %s", chapter.title, len(indices), indices[:12])
+                for future in done:
+                    index = pending[future]
+                    try:
+                        paths[index - 1] = future.result()
+                    except Exception as exc:
+                        raise RuntimeError(f"Obrazek {index}/{len(urls)} ({urls[index - 1]}): {exc}") from exc
+                    completed += 1
+                    LOG.info("%s: hotovo %d/%d (obrazek %d)", chapter.title, completed, len(urls), index)
         except BaseException:
             for future in pending:
                 future.cancel()
@@ -363,7 +427,7 @@ def main(argv=None) -> int:
     parser.add_argument("--oldest-first", action="store_true", help="Radit od nejnizsiho cisla kapitoly (vychozi)")
     parser.add_argument("--newest-first", action="store_true", help="Radit od nejvyssiho cisla kapitoly")
     parser.add_argument("--force", action="store_true", help="Znovu stahnout i hotove kapitoly")
-    parser.add_argument("--timeout", type=float, default=60)
+    parser.add_argument("--timeout", type=float, default=60, help="Limit jednoho pokusu o prenos v sekundach (vychozi 60)")
     parser.add_argument("--workers", type=int, default=4, help="Pocet soubezne stahovanych obrazku (vychozi 4, 1 = postupne)")
     parser.add_argument("--pdf-workers", type=int, default=1, help="Pocet procesu pro PDF bezici soubezne se stahovanim (vychozi 1)")
     parser.add_argument("--delay", type=float, default=0.5, help="Prodleva pred pozadavkem v kazdem vlakne v sekundach")
@@ -374,7 +438,7 @@ def main(argv=None) -> int:
         parser.error("Vyberte pouze jeden smer razeni")
     if args.timeout <= 0 or args.delay < 0 or args.workers < 1 or args.pdf_workers < 1 or (args.limit is not None and args.limit <= 0):
         parser.error("timeout, limit, workers a pdf-workers musi byt kladne, delay nezaporne")
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
     client = None
     try:
         client = Client(args.timeout, args.delay, args.user_agent)

@@ -4,9 +4,10 @@ import io
 import threading
 import time
 import unittest
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from PIL import Image
 from pypdf import PdfReader
 
@@ -14,6 +15,49 @@ from manga_leech import Chapter, Client, chapter_sort_key, download_chapter, fin
 
 
 class Tests(unittest.TestCase):
+    def test_slow_trickle_has_total_deadline_and_retries(self):
+        client = Client(1, 0)
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read1.return_value = b'x'
+        opener = MagicMock()
+        opener.open.return_value = response
+        ticks = iter(i * .6 for i in range(100))
+        with patch.object(client, 'thread_opener', return_value=opener), patch('manga_leech.time.monotonic', side_effect=lambda: next(ticks)), patch('manga_leech.time.sleep'), self.assertLogs('manga-leech', level='WARNING') as logs:
+            with self.assertRaises(TimeoutError):
+                client.get('https://example.org/slow')
+        self.assertEqual(opener.open.call_count, 3)
+        self.assertEqual(response.__exit__.call_count, 3)
+        self.assertTrue(any('pokus 3/3' in line for line in logs.output))
+
+    def test_rate_limit_retry_after_and_recovery(self):
+        client = Client(60, 0)
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read1.side_effect = [b'abc', b'']
+        response.headers = {'Content-Length': '3'}
+        opener = MagicMock()
+        opener.open.side_effect = [urllib.error.HTTPError('https://example.org/image', 429, 'Rate limit', {'Retry-After': '0'}, None), response]
+        with patch.object(client, 'thread_opener', return_value=opener), patch('manga_leech.time.sleep'), self.assertLogs('manga-leech', level='WARNING') as logs:
+            self.assertEqual(client.get('https://example.org/image'), b'abc')
+        self.assertIn('example.org', client.cooldowns)
+        self.assertTrue(any('HTTP 429' in line for line in logs.output))
+        self.assertEqual(client.retry_delay({'Retry-After': '25'}, 2), 25)
+        self.assertEqual(client.retry_delay({'Retry-After': 'invalid'}, 2), 2)
+
+    def test_truncated_body_is_not_accepted(self):
+        client = Client(60, 0)
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read1.side_effect = [b'a', b'', b'a', b'', b'a', b'']
+        response.headers = {'Content-Length': '100'}
+        opener = MagicMock()
+        opener.open.return_value = response
+        with patch.object(client, 'thread_opener', return_value=opener), patch('manga_leech.time.sleep'), self.assertLogs('manga-leech', level='WARNING'):
+            with self.assertRaises(Exception):
+                client.get('https://example.org/truncated')
+        self.assertEqual(opener.open.call_count, 3)
+
     def test_jpeg_bytes_preserved_even_with_img_extension(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -207,7 +251,7 @@ class Tests(unittest.TestCase):
                     return '<section id="chapter-images"><img src="/1.png"></section>'
                 def get(self, url, referer=None):
                     return b'<html>error</html>'
-            with self.assertRaises(OSError):
+            with self.assertRaisesRegex(RuntimeError, 'Obrazek 1/1'):
                 download_chapter(BrokenClient(), Chapter('Broken', 'https://example.org/c'), Path(directory), False)
             self.assertEqual(list(Path(directory).glob('*.pdf')), [])
 

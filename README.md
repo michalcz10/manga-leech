@@ -45,7 +45,7 @@ RSS je seznam posledních vydání, nikoli archiv celé série. Při ověření 
 - `--workers 4`: počet současně stahovaných obrázků, výchozí 4. `--workers 1` stahuje postupně. Počet není vázaný na CPU, protože stahování čeká hlavně na síť.
 - `--pdf-workers 1`: počet samostatných procesů pro tvorbu PDF, výchozí 1. PDF se generuje na pozadí souběžně se stahováním další kapitoly. Hodnota 2 umožní tvořit dvě PDF současně a vyžaduje více paměti.
 - `--delay 1`: prodleva před každým požadavkem v jednotlivém vlákně, výchozí 0,5 s. Nejde o společný limit všech vláken; více vláken zvýší celkový počet požadavků za sekundu.
-- `--timeout 60`: časový limit požadavku v sekundách.
+- `--timeout 60`: časový limit jednoho pokusu o přenos v sekundách. Čtení kontroluje i celkovou dobu, nejen nečinnost socketu. Jedno blokující čtení může limit překročit nejvýše přibližně o 10 s; systémové DNS nemusí tento limit respektovat.
 
 Kapitoly se stahují postupně; uvnitř každé kapitoly se obrázky stahují paralelně. Po dokončení obrázků se kapitola předá samostatnému PDF procesu a ihned začne stahování další kapitoly. PDF zachovává původní pořadí čtečky. Fronta má nejvýše dvojnásobek `--pdf-workers` nedokončených PDF; při zaplnění stahování počká. Procesům se předávají pouze cesty k obrázkům. Před úspěšným ukončením aplikace počká na všechna PDF; chyba tvorby PDF vede k návratovému kódu 1. Při přerušení se zruší čekající úlohy a běžící práce doběhne, což může chvíli trvat. Ověřené obrázky zůstávají pro další spuštění.
 
@@ -63,7 +63,7 @@ PDF se ukládají do `downloads/`. Ověřené obrázky zůstávají v `downloads
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Testy ověřují RSS/Atom, načtení úplného seznamu série místo náhledu, odstranění duplicit, chybu při chybějícím seznamu, načtení HTML fragmentu čtečky bez prohlížeče, pořadí a výběr obrázků, počet a rozměry PDF stran, navázání stahování a odmítnutí poškozených obrázků. Dále ověřují skutečný souběh stahování, zachování pořadí v PDF při opačném pořadí dokončení a samostatné HTTP klienty vláken. Testy také ověřují překryv tvorby PDF se stahováním další kapitoly, dokončení PDF před návratem, hlášení chyb tvorby PDF a skutečné spuštění PDF procesu. Testy navíc porovnávají vložené JPEG streamy s původními soubory (RGB, odstíny šedi i CMYK). Všech 14 testů prošlo na dostupném Pythonu 3.12; Python 3.15 zde nebyl dostupný. Živě bylo dříve ověřeno načtení všech 225 položek série a také stažení všech 205 obrázků referenční kapitoly 1 do PDF s 205 stranami. Dostupnost serveru může kolísat; předchozí požadavky někdy vracely 403.
+Testy ověřují RSS/Atom, načtení úplného seznamu série místo náhledu, odstranění duplicit, chybu při chybějícím seznamu, načtení HTML fragmentu čtečky bez prohlížeče, pořadí a výběr obrázků, počet a rozměry PDF stran, navázání stahování a odmítnutí poškozených obrázků. Dále ověřují skutečný souběh stahování, zachování pořadí v PDF při opačném pořadí dokončení a samostatné HTTP klienty vláken. Testy také ověřují překryv tvorby PDF se stahováním další kapitoly, dokončení PDF před návratem, hlášení chyb tvorby PDF a skutečné spuštění PDF procesu. Testy navíc porovnávají vložené JPEG streamy s původními soubory (RGB, odstíny šedi i CMYK). Testy také simulují pomalý nepřetržitý přenos, HTTP 429 s opakováním a neúplnou odpověď. Všech 17 testů prošlo na dostupném Pythonu 3.12; Python 3.15 zde nebyl dostupný. Živě bylo dříve ověřeno načtení všech 225 položek série a také stažení všech 205 obrázků referenční kapitoly 1 do PDF s 205 stranami. Dostupnost serveru může kolísat; předchozí požadavky někdy vracely 403.
 
 ## Referenční kapitola 1
 
@@ -82,3 +82,13 @@ JPEG obrázky se vkládají v původní komprimované podobě bez překódován�
 Ověřeno na kapitole 1 s 205 JPEG obrázky: zdroj 13,43 MB, původní PDF 139,55 MB, nové PDF 13,57 MB. Nové PDF vzniklo přibližně za 1,6 sekundy na testovacím stroji. Všech 205 vložených JPEG streamů odpovídá původním souborům bajt po bajtu.
 
 Verze způsobu vytváření PDF je součástí otisku dokončené kapitoly. Starší PDF se při běžném spuštění automaticky přestaví z ověřené cache, bez nutnosti `--force` a opětovného stahování existujících obrázků. Seznam kapitol a obrázků se nadále načítá ze serveru.
+
+## Čekání na poslední obrázky
+
+Log obsahuje čas, číslo čekajícího obrázku a při selhání také jeho URL. Pokud se 10 sekund nedokončí žádný obrázek, aplikace vypíše seznam čekajících obrázků. Číslo v běžném výpisu znamená počet dokončených obrázků; poslední čekající soubor nemusí být poslední stránkou kapitoly.
+
+Každý přenos má nejvýše tři pokusy. Chyby a číslo pokusu se vypisují. Síťové čtení má limit nečinnosti nejvýše 10 s, celkový přenos je navíc omezen pomocí `--timeout`. Pomalé průběžné posílání dat tak nemůže neomezeně obnovovat timeout. Neúplná odpověď s nesouhlasícím Content-Length se opakuje.
+
+Při HTTP 429 nebo 503 klient respektuje Retry-After (sekundy nebo HTTP datum) a nastaví společnou pauzu pro další požadavky všech vláken na stejný host. Již běžící požadavky doběhnou. Pokud server žádá pauzu delší než 120 s, požadavek selže s vysvětlením místo dlouhého čekání. Pro nezotavitelné selhání se nevytvoří neúplné PDF; ověřené obrázky zůstávají v cache a další kapitoly mohou pokračovat.
+
+Pro diagnostiku lze použít `--workers 2 --timeout 30`. Zaznamenané HTTP 429 potvrzuje omezení serverem; samotné čekání na poslední obrázek jeho příčinu nepotvrzuje.
