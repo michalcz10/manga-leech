@@ -8,12 +8,14 @@ import http.cookiejar
 import logging
 import re
 import sys
+import threading
 import time
 import unicodedata
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal
 from html.parser import HTMLParser
 from pathlib import Path
@@ -153,9 +155,16 @@ class Client:
     def __init__(self, timeout: float, delay: float, user_agent: str = "MangaLeech/0.1"):
         self.timeout, self.delay = timeout, delay
         self.user_agent = user_agent
-        self.opener = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
-        )
+        self.cookies = http.cookiejar.CookieJar()
+        self.local = threading.local()
+
+    def thread_opener(self):
+        # Handler state is per thread; CookieJar synchronizes access internally.
+        if not hasattr(self.local, "opener"):
+            self.local.opener = urllib.request.build_opener(
+                urllib.request.HTTPCookieProcessor(self.cookies)
+            )
+        return self.local.opener
 
     def get(self, url: str, referer: str | None = None) -> bytes:
         headers = {"User-Agent": self.user_agent, "Accept": "*/*"}
@@ -164,7 +173,7 @@ class Client:
         for attempt in range(3):
             time.sleep(self.delay)
             try:
-                with self.opener.open(urllib.request.Request(http_url(url), headers=headers), timeout=self.timeout) as response:
+                with self.thread_opener().open(urllib.request.Request(http_url(url), headers=headers), timeout=self.timeout) as response:
                     return response.read()
             except urllib.error.HTTPError as exc:
                 if exc.code not in {429, 500, 502, 503, 504} or attempt == 2:
@@ -244,7 +253,9 @@ def make_pdf(images: list[Path], output: Path, title: str):
         temporary.unlink(missing_ok=True)
 
 
-def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool):
+def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool, workers: int = 4):
+    if workers < 1:
+        raise ValueError("Pocet vlaken musi byt alespon 1")
     name = safe_name(chapter)
     pdf = output / f"{name}.pdf"
     urls = image_urls(client.chapter_html(chapter.url), chapter.url)
@@ -255,8 +266,7 @@ def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool
         return
     cache = output / ".images" / name
     cache.mkdir(parents=True, exist_ok=True)
-    paths = []
-    for index, url in enumerate(urls, 1):
+    def download_image(index, url):
         key = hashlib.sha256(url.encode()).hexdigest()[:12]
         path = cache / f"{index:05d}-{key}.img"
         if force or not valid_image(path):
@@ -267,8 +277,20 @@ def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool
             temporary = path.with_suffix(".part")
             temporary.write_bytes(data)
             temporary.replace(path)
-        paths.append(path)
-        LOG.info("%s: obrazek %d/%d", chapter.title, index, len(urls))
+        return path
+
+    paths = [None] * len(urls)
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="image") as executor:
+        pending = {executor.submit(download_image, index, url): index for index, url in enumerate(urls, 1)}
+        try:
+            for completed, future in enumerate(as_completed(pending), 1):
+                index = pending[future]
+                paths[index - 1] = future.result()
+                LOG.info("%s: hotovo %d/%d (obrazek %d)", chapter.title, completed, len(urls), index)
+        except BaseException:
+            for future in pending:
+                future.cancel()
+            raise
     make_pdf(paths, pdf, chapter.title)
     manifest.write_text(signature)
     LOG.info("Hotovo: %s", pdf)
@@ -286,14 +308,15 @@ def main(argv=None) -> int:
     parser.add_argument("--newest-first", action="store_true", help="Radit od nejvyssiho cisla kapitoly")
     parser.add_argument("--force", action="store_true", help="Znovu stahnout i hotove kapitoly")
     parser.add_argument("--timeout", type=float, default=60)
-    parser.add_argument("--delay", type=float, default=0.5, help="Prodleva mezi pozadavky v sekundach")
+    parser.add_argument("--workers", type=int, default=4, help="Pocet soubezne stahovanych obrazku (vychozi 4, 1 = postupne)")
+    parser.add_argument("--delay", type=float, default=0.5, help="Prodleva pred pozadavkem v kazdem vlakne v sekundach")
     args = parser.parse_args(argv)
     if bool(args.feed) == bool(args.chapter):
         parser.error("Zadejte RSS / stranku serie, nebo --chapter URL")
     if args.oldest_first and args.newest_first:
         parser.error("Vyberte pouze jeden smer razeni")
-    if args.timeout <= 0 or args.delay < 0 or (args.limit is not None and args.limit <= 0):
-        parser.error("timeout a limit musi byt kladne, delay nezaporne")
+    if args.timeout <= 0 or args.delay < 0 or args.workers < 1 or (args.limit is not None and args.limit <= 0):
+        parser.error("timeout, limit a workers musi byt kladne, delay nezaporne")
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     client = None
     try:
@@ -317,10 +340,11 @@ def main(argv=None) -> int:
                 print(f"{chapter.title}\t{chapter.url}")
             return 0
         args.output.mkdir(parents=True, exist_ok=True)
+        LOG.info("Stahovani pomoci %d vlaken.", args.workers)
         failures = 0
         for chapter in chapters:
             try:
-                download_chapter(client, chapter, args.output, args.force)
+                download_chapter(client, chapter, args.output, args.force, args.workers)
             except Exception as exc:
                 failures += 1
                 LOG.error("Kapitola %s selhala: %s", chapter.title, exc)

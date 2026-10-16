@@ -1,5 +1,9 @@
 import tempfile
+import io
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from PIL import Image
 from pypdf import PdfReader
@@ -8,6 +12,36 @@ from manga_leech import Chapter, Client, chapter_sort_key, download_chapter, ima
 
 
 class Tests(unittest.TestCase):
+    def test_concurrent_download_keeps_pdf_order(self):
+        barrier = threading.Barrier(3)
+        class ParallelClient:
+            def chapter_html(self, url):
+                return '<section id="chapter-images">' + ''.join(f'<img src="/{i}.png" />' for i in range(1, 4)) + '</section>'
+            def get(self, url, referer=None):
+                index = int(url.rsplit('/', 1)[-1].split('.')[0])
+                barrier.wait(timeout=5)  # Fails if downloads are actually sequential.
+                time.sleep((3 - index) * .02)
+                data = io.BytesIO()
+                Image.new('RGB', (100, 100 * index), 'red').save(data, format='PNG')
+                return data.getvalue()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            download_chapter(ParallelClient(), Chapter('Parallel', 'https://example.org/c'), root, False, workers=3)
+            pages = PdfReader(next(root.glob('*.pdf'))).pages
+            self.assertEqual([float(p.mediabox.height) / float(p.mediabox.width) for p in pages], [1, 2, 3])
+
+    def test_http_openers_are_per_thread(self):
+        client = Client(60, 0)
+        barrier = threading.Barrier(3)
+        def opener():
+            first = client.thread_opener()
+            barrier.wait(timeout=5)
+            self.assertIs(first, client.thread_opener())
+            return first
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            openers = list(executor.map(lambda _: opener(), range(3)))
+        self.assertEqual(len({id(o) for o in openers}), 3)
+
     def test_full_series_not_preview_and_dedup(self):
         class SeriesClient(Client):
             def __init__(self):

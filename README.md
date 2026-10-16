@@ -42,8 +42,16 @@ RSS je seznam posledních vydání, nikoli archiv celé série. Při ověření 
 - `--newest-first`: řazení od nejvyšší kapitoly.
 - `--chapter URL`: stáhne přímo jednu kapitolu místo RSS.
 - `--force`: stáhne znovu obrázky i existující PDF.
-- `--delay 1`: prodleva mezi požadavky, výchozí 0,5 s.
+- `--workers 4`: počet současně stahovaných obrázků, výchozí 4. `--workers 1` stahuje postupně. Počet není vázaný na CPU, protože stahování čeká hlavně na síť.
+- `--delay 1`: prodleva před každým požadavkem v jednotlivém vlákně, výchozí 0,5 s. Nejde o společný limit všech vláken; více vláken zvýší celkový počet požadavků za sekundu.
 - `--timeout 60`: časový limit požadavku v sekundách.
+
+Kapitoly se zpracovávají postupně; uvnitř každé kapitoly se obrázky stahují paralelně. PDF se sestavuje až po úspěšném dokončení všech obrázků, v původním pořadí čtečky bez ohledu na pořadí dokončení stahování. Každé vlákno má vlastní HTTP klient a sdílené cookies. Při chybě se zruší čekající úlohy, rozběhnuté požadavky doběhnou a již ověřené obrázky zůstanou pro další spuštění.
+
+```powershell
+# Vlastní počet vláken
+.\.venv\Scripts\python.exe manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer" --workers 8
+```
 
 PDF se ukládají do `downloads/`. Ověřené obrázky zůstávají v `downloads/.images/`, aby další spuštění mohlo navázat. Hotová PDF se přeskakují pouze tehdy, pokud souhlasí uložený otisk seznamu obrázků (`.pages.sha256`). Starší PDF bez tohoto záznamu se automaticky vytvoří znovu, včetně dříve neúplných jednostránkových PDF. Neúplná kapitola se jako PDF nezveřejní; chyba jedné kapitoly nezastaví ostatní. Návratový kód 0 znamená úspěch, 1 chybu, 130 přerušení. Poškozené nebo zastaralé hotové PDF lze obnovit pomocí `--force`.
 
@@ -54,7 +62,7 @@ PDF se ukládají do `downloads/`. Ověřené obrázky zůstávají v `downloads
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Testy ověřují RSS/Atom, načtení úplného seznamu série místo náhledu, odstranění duplicit, chybu při chybějícím seznamu, načtení HTML fragmentu čtečky bez prohlížeče, pořadí a výběr obrázků, počet a rozměry PDF stran, navázání stahování a odmítnutí poškozených obrázků. Testy běží na dostupném Pythonu 3.12; Python 3.15 zde nebyl dostupný. Živě bylo ověřeno načtení všech 225 položek série a dříve také stažení všech 205 obrázků referenční kapitoly 1 do PDF s 205 stranami. Dostupnost serveru může kolísat; předchozí požadavky někdy vracely 403.
+Testy ověřují RSS/Atom, načtení úplného seznamu série místo náhledu, odstranění duplicit, chybu při chybějícím seznamu, načtení HTML fragmentu čtečky bez prohlížeče, pořadí a výběr obrázků, počet a rozměry PDF stran, navázání stahování a odmítnutí poškozených obrázků. Dále ověřují skutečný souběh stahování, zachování pořadí v PDF při opačném pořadí dokončení a samostatné HTTP klienty vláken. Všech 11 testů prošlo na dostupném Pythonu 3.12; Python 3.15 zde nebyl dostupný. Živě bylo dříve ověřeno načtení všech 225 položek série a také stažení všech 205 obrázků referenční kapitoly 1 do PDF s 205 stranami. Dostupnost serveru může kolísat; předchozí požadavky někdy vracely 403.
 
 ## Referenční kapitola 1
 
