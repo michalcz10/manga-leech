@@ -15,17 +15,21 @@ import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from decimal import Decimal
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 from PIL import Image
+from reportlab import rl_config
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 LOG = logging.getLogger("manga-leech")
+# PDF supports binary streams; ASCII85 would add about 25% to embedded JPEGs.
+rl_config.useA85 = False
+PDF_FORMAT_VERSION = "original-jpeg-v1"
 VOID_TAGS = {"img", "br", "hr", "input", "meta", "link", "source", "wbr", "area", "base", "embed", "param", "track", "col"}
 
 
@@ -234,32 +238,41 @@ def valid_image(path: Path) -> bool:
 def make_pdf(images: list[Path], output: Path, title: str):
     temporary = output.with_suffix(".pdf.part")
     try:
-        pdf = canvas.Canvas(str(temporary))
+        pdf = canvas.Canvas(str(temporary), pageCompression=1)
         pdf.setTitle(title)
         for path in images:
             with Image.open(path) as source:
-                image = source.convert("RGB")
                 # One original image per PDF page; keep aspect ratio and avoid PDF size limits.
-                width, height = image.size
+                width, height = source.size
                 scale = min(0.75, 14000 / max(width, height))
                 w, h = width * scale, height * scale
                 pdf.setPageSize((w, h))
-                pdf.drawImage(ImageReader(image), 0, 0, width=w, height=h)
+                # Read from the file so ImageReader retains the original JPEG stream.
+                # This detects the actual format even for our cached .img filenames.
+                pdf.drawImage(ImageReader(str(path)), 0, 0, width=w, height=h, mask="auto")
                 pdf.showPage()
-                image.close()
         pdf.save()
         temporary.replace(output)
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool, workers: int = 4):
+def finish_pdf(paths, pdf, title, manifest, signature):
+    """Top-level function so Windows can run it in a spawned process."""
+    make_pdf(paths, pdf, title)
+    temporary = manifest.with_suffix(".sha256.part")
+    temporary.write_text(signature)
+    temporary.replace(manifest)
+    return pdf
+
+
+def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool, workers: int = 4, pdf_executor=None):
     if workers < 1:
         raise ValueError("Pocet vlaken musi byt alespon 1")
     name = safe_name(chapter)
     pdf = output / f"{name}.pdf"
     urls = image_urls(client.chapter_html(chapter.url), chapter.url)
-    signature = hashlib.sha256("\n".join(urls).encode()).hexdigest()
+    signature = hashlib.sha256((PDF_FORMAT_VERSION + "\n" + "\n".join(urls)).encode()).hexdigest()
     manifest = output / f"{name}.pages.sha256"
     if pdf.exists() and manifest.exists() and manifest.read_text() == signature and not force:
         LOG.info("Preskakuji existujici PDF: %s", pdf.name)
@@ -291,9 +304,52 @@ def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool
             for future in pending:
                 future.cancel()
             raise
-    make_pdf(paths, pdf, chapter.title)
-    manifest.write_text(signature)
+    if pdf_executor is not None:
+        LOG.info("Predavam do tvorby PDF: %s", chapter.title)
+        return pdf_executor.submit(finish_pdf, paths, pdf, chapter.title, manifest, signature)
+    finish_pdf(paths, pdf, chapter.title, manifest, signature)
     LOG.info("Hotovo: %s", pdf)
+
+
+def run_downloads(client, chapters, output, force, workers, pdf_workers):
+    failures = 0
+    pending = {}
+
+    def collect(block=False):
+        nonlocal failures
+        done = wait(pending, return_when=FIRST_COMPLETED).done if block else {f for f in pending if f.done()}
+        for future in done:
+            title = pending.pop(future)
+            try:
+                LOG.info("Hotovo: %s", future.result())
+            except Exception as exc:
+                failures += 1
+                LOG.error("Tvorba PDF %s selhala: %s", title, exc)
+
+    with ProcessPoolExecutor(max_workers=pdf_workers) as executor:
+        try:
+            for chapter in chapters:
+                collect()
+                # Bound queued chapters; pass paths rather than image bytes to workers.
+                while len(pending) >= pdf_workers * 2:
+                    LOG.info("Cekam na uvolneni fronty PDF...")
+                    collect(block=True)
+                try:
+                    future = download_chapter(client, chapter, output, force, workers, executor)
+                    if future is not None:
+                        pending[future] = chapter.title
+                except Exception as exc:
+                    failures += 1
+                    LOG.error("Kapitola %s selhala: %s", chapter.title, exc)
+            if pending:
+                LOG.info("Stahovani dokonceno, cekam na zbyvajici PDF...")
+            while pending:
+                collect(block=True)
+        except BaseException:
+            for future in pending:
+                future.cancel()
+            raise
+    return failures
 
 
 def main(argv=None) -> int:
@@ -309,14 +365,15 @@ def main(argv=None) -> int:
     parser.add_argument("--force", action="store_true", help="Znovu stahnout i hotove kapitoly")
     parser.add_argument("--timeout", type=float, default=60)
     parser.add_argument("--workers", type=int, default=4, help="Pocet soubezne stahovanych obrazku (vychozi 4, 1 = postupne)")
+    parser.add_argument("--pdf-workers", type=int, default=1, help="Pocet procesu pro PDF bezici soubezne se stahovanim (vychozi 1)")
     parser.add_argument("--delay", type=float, default=0.5, help="Prodleva pred pozadavkem v kazdem vlakne v sekundach")
     args = parser.parse_args(argv)
     if bool(args.feed) == bool(args.chapter):
         parser.error("Zadejte RSS / stranku serie, nebo --chapter URL")
     if args.oldest_first and args.newest_first:
         parser.error("Vyberte pouze jeden smer razeni")
-    if args.timeout <= 0 or args.delay < 0 or args.workers < 1 or (args.limit is not None and args.limit <= 0):
-        parser.error("timeout, limit a workers musi byt kladne, delay nezaporne")
+    if args.timeout <= 0 or args.delay < 0 or args.workers < 1 or args.pdf_workers < 1 or (args.limit is not None and args.limit <= 0):
+        parser.error("timeout, limit, workers a pdf-workers musi byt kladne, delay nezaporne")
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     client = None
     try:
@@ -341,13 +398,7 @@ def main(argv=None) -> int:
             return 0
         args.output.mkdir(parents=True, exist_ok=True)
         LOG.info("Stahovani pomoci %d vlaken.", args.workers)
-        failures = 0
-        for chapter in chapters:
-            try:
-                download_chapter(client, chapter, args.output, args.force, args.workers)
-            except Exception as exc:
-                failures += 1
-                LOG.error("Kapitola %s selhala: %s", chapter.title, exc)
+        failures = run_downloads(client, chapters, args.output, args.force, args.workers, args.pdf_workers)
         return 1 if failures else 0
     except KeyboardInterrupt:
         LOG.error("Preruseno. Dalsi spusteni navaze na stazene obrazky.")

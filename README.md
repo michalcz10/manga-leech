@@ -43,14 +43,15 @@ RSS je seznam posledních vydání, nikoli archiv celé série. Při ověření 
 - `--chapter URL`: stáhne přímo jednu kapitolu místo RSS.
 - `--force`: stáhne znovu obrázky i existující PDF.
 - `--workers 4`: počet současně stahovaných obrázků, výchozí 4. `--workers 1` stahuje postupně. Počet není vázaný na CPU, protože stahování čeká hlavně na síť.
+- `--pdf-workers 1`: počet samostatných procesů pro tvorbu PDF, výchozí 1. PDF se generuje na pozadí souběžně se stahováním další kapitoly. Hodnota 2 umožní tvořit dvě PDF současně a vyžaduje více paměti.
 - `--delay 1`: prodleva před každým požadavkem v jednotlivém vlákně, výchozí 0,5 s. Nejde o společný limit všech vláken; více vláken zvýší celkový počet požadavků za sekundu.
 - `--timeout 60`: časový limit požadavku v sekundách.
 
-Kapitoly se zpracovávají postupně; uvnitř každé kapitoly se obrázky stahují paralelně. PDF se sestavuje až po úspěšném dokončení všech obrázků, v původním pořadí čtečky bez ohledu na pořadí dokončení stahování. Každé vlákno má vlastní HTTP klient a sdílené cookies. Při chybě se zruší čekající úlohy, rozběhnuté požadavky doběhnou a již ověřené obrázky zůstanou pro další spuštění.
+Kapitoly se stahují postupně; uvnitř každé kapitoly se obrázky stahují paralelně. Po dokončení obrázků se kapitola předá samostatnému PDF procesu a ihned začne stahování další kapitoly. PDF zachovává původní pořadí čtečky. Fronta má nejvýše dvojnásobek `--pdf-workers` nedokončených PDF; při zaplnění stahování počká. Procesům se předávají pouze cesty k obrázkům. Před úspěšným ukončením aplikace počká na všechna PDF; chyba tvorby PDF vede k návratovému kódu 1. Při přerušení se zruší čekající úlohy a běžící práce doběhne, což může chvíli trvat. Ověřené obrázky zůstávají pro další spuštění.
 
 ```powershell
 # Vlastní počet vláken
-.\.venv\Scripts\python.exe manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer" --workers 8
+.\.venv\Scripts\python.exe manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer" --workers 8 --pdf-workers 2
 ```
 
 PDF se ukládají do `downloads/`. Ověřené obrázky zůstávají v `downloads/.images/`, aby další spuštění mohlo navázat. Hotová PDF se přeskakují pouze tehdy, pokud souhlasí uložený otisk seznamu obrázků (`.pages.sha256`). Starší PDF bez tohoto záznamu se automaticky vytvoří znovu, včetně dříve neúplných jednostránkových PDF. Neúplná kapitola se jako PDF nezveřejní; chyba jedné kapitoly nezastaví ostatní. Návratový kód 0 znamená úspěch, 1 chybu, 130 přerušení. Poškozené nebo zastaralé hotové PDF lze obnovit pomocí `--force`.
@@ -62,7 +63,7 @@ PDF se ukládají do `downloads/`. Ověřené obrázky zůstávají v `downloads
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Testy ověřují RSS/Atom, načtení úplného seznamu série místo náhledu, odstranění duplicit, chybu při chybějícím seznamu, načtení HTML fragmentu čtečky bez prohlížeče, pořadí a výběr obrázků, počet a rozměry PDF stran, navázání stahování a odmítnutí poškozených obrázků. Dále ověřují skutečný souběh stahování, zachování pořadí v PDF při opačném pořadí dokončení a samostatné HTTP klienty vláken. Všech 11 testů prošlo na dostupném Pythonu 3.12; Python 3.15 zde nebyl dostupný. Živě bylo dříve ověřeno načtení všech 225 položek série a také stažení všech 205 obrázků referenční kapitoly 1 do PDF s 205 stranami. Dostupnost serveru může kolísat; předchozí požadavky někdy vracely 403.
+Testy ověřují RSS/Atom, načtení úplného seznamu série místo náhledu, odstranění duplicit, chybu při chybějícím seznamu, načtení HTML fragmentu čtečky bez prohlížeče, pořadí a výběr obrázků, počet a rozměry PDF stran, navázání stahování a odmítnutí poškozených obrázků. Dále ověřují skutečný souběh stahování, zachování pořadí v PDF při opačném pořadí dokončení a samostatné HTTP klienty vláken. Testy také ověřují překryv tvorby PDF se stahováním další kapitoly, dokončení PDF před návratem, hlášení chyb tvorby PDF a skutečné spuštění PDF procesu. Testy navíc porovnávají vložené JPEG streamy s původními soubory (RGB, odstíny šedi i CMYK). Všech 14 testů prošlo na dostupném Pythonu 3.12; Python 3.15 zde nebyl dostupný. Živě bylo dříve ověřeno načtení všech 225 položek série a také stažení všech 205 obrázků referenční kapitoly 1 do PDF s 205 stranami. Dostupnost serveru může kolísat; předchozí požadavky někdy vracely 403.
 
 ## Referenční kapitola 1
 
@@ -73,3 +74,11 @@ RSS obsahuje pouze kapitoly 204–223, proto po seřazení začne kapitolou 204.
 ```
 
 Opravený parser zpracovává i samouzavírací značky `<img />` a u referenční kapitoly načítá všech 205 obrázků.
+
+## Velikost PDF
+
+JPEG obrázky se vkládají v původní komprimované podobě bez překódování a bez ztráty kvality. Formát se rozpoznává podle obsahu i u cache souborů s příponou `.img`. Ostatní formáty se ukládají bezeztrátově pomocí Flate; u nich není zaručená velikost blízká původním souborům. Rozměry obrázků se nemění. Binární obrazové streamy se zbytečně nekódují přes ASCII85.
+
+Ověřeno na kapitole 1 s 205 JPEG obrázky: zdroj 13,43 MB, původní PDF 139,55 MB, nové PDF 13,57 MB. Nové PDF vzniklo přibližně za 1,6 sekundy na testovacím stroji. Všech 205 vložených JPEG streamů odpovídá původním souborům bajt po bajtu.
+
+Verze způsobu vytváření PDF je součástí otisku dokončené kapitoly. Starší PDF se při běžném spuštění automaticky přestaví z ověřené cache, bez nutnosti `--force` a opětovného stahování existujících obrázků. Seznam kapitol a obrázků se nadále načítá ze serveru.
