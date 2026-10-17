@@ -12,10 +12,31 @@ from unittest.mock import patch, MagicMock
 from PIL import Image
 from pypdf import PdfReader
 
-from manga_leech import Chapter, Client, chapter_sort_key, download_chapter, finish_pdf, image_urls, make_pdf, parse_feed, run_downloads, pdf_name, safe_name
+from manga_leech import Chapter, Client, SeriesPage, chapter_sort_key, download_chapter, finish_pdf, image_urls, make_pdf, parse_feed, run_downloads, pdf_name, safe_name
 
 
 class Tests(unittest.TestCase):
+    def test_page_labels_in_series_rss_and_names(self):
+        page = SeriesPage()
+        page.feed('<a href="/chapters/ten"><span>Page. 10</span><time>2026</time></a><a href="/chapters/one">Page. 1</a><a href="/chapters/half">Page 1.5</a>')
+        chapters = [Chapter('Horimiya ' + c.title, c.url) for c in page.chapters]
+        self.assertEqual([pdf_name(c) for c in sorted(chapters, key=chapter_sort_key)], ['Horimiya - Ch 001', 'Horimiya - Ch 001.5', 'Horimiya - Ch 010'])
+        rss = b'<rss><channel><item><title>Horimiya Page. 25</title><link>/chapters/25</link></item></channel></rss>'
+        self.assertEqual(pdf_name(parse_feed(rss, 'https://example.org')[0]), 'Horimiya - Ch 025')
+
+    def test_page_pdf_title_and_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / 'page.png'
+            Image.new('RGB', (20, 40), 'red').save(image)
+            output = root / 'Horimiya - Ch 001.pdf'
+            make_pdf([image], output, 'Horimiya Page. 1')
+            reader = PdfReader(output)
+            self.assertEqual(reader.metadata.title, 'Horimiya')
+            xmp = ET.fromstring(reader.trailer['/Root']['/Metadata'].get_data())
+            self.assertEqual(xmp.find('.//{http://calibre-ebook.com/xmp-namespace}series').text, 'Horimiya')
+            self.assertEqual(xmp.find('.//{http://calibre-ebook.com/xmp-namespace-series-index}series_index').text, '1')
+
     def test_pdf_names(self):
         for number, expected in [('0', '000'), ('25', '025'), ('104.1', '104.1'), ('1000', '1000')]:
             self.assertEqual(pdf_name(Chapter(f'Overgeared Chapter {number}', 'https://example.org/c')), f'Overgeared - Ch {expected}')

@@ -32,7 +32,8 @@ from reportlab.pdfgen import canvas
 LOG = logging.getLogger("manga-leech")
 # PDF supports binary streams; ASCII85 would add about 25% to embedded JPEGs.
 rl_config.useA85 = False
-PDF_FORMAT_VERSION = "original-jpeg-series-title-v3"
+PDF_FORMAT_VERSION = "original-jpeg-series-title-v4"
+CHAPTER_LABEL = re.compile(r'\b(?:Chapter|Page)\.?\s+(\d+(?:\.\d+)?)(?=\s|$)', re.I)
 VOID_TAGS = {"img", "br", "hr", "input", "meta", "link", "source", "wbr", "area", "base", "embed", "param", "track", "col"}
 
 
@@ -43,12 +44,13 @@ class Chapter:
 
 
 def chapter_sort_key(chapter: Chapter):
-    match = re.search(r'\bchapter\s+(\d+(?:\.\d+)?)', chapter.title, re.I)
+    matches = list(CHAPTER_LABEL.finditer(chapter.title))
+    match = matches[-1] if matches else None
     return (0, Decimal(match.group(1))) if match else (1, Decimal(0))
 
 
 def series_metadata(title: str):
-    matches = list(re.finditer(r'\bChapter\s+(\d+(?:\.\d+)?)(?=\s|$)', title, re.I))
+    matches = list(CHAPTER_LABEL.finditer(title))
     if matches:
         match = matches[-1]
         series = title[:match.start()].strip()
@@ -149,7 +151,7 @@ class SeriesPage(HTMLParser):
         if tag == "a":
             if self.anchor and re.fullmatch(r'/chapters/[^/]+', urlparse(self.anchor).path):
                 text = " ".join(" ".join(self.text).split())
-                match = re.search(r'\bChapter\s+\d+(?:\.\d+)?', text, re.I)
+                match = CHAPTER_LABEL.search(text)
                 if match:
                     self.chapters.append(Chapter(match.group(), self.anchor))
             self.anchor = None
@@ -510,7 +512,7 @@ def main(argv=None) -> int:
             page = SeriesPage()
             page.feed(client.get(url).decode('utf-8-sig'))
             parts = [part.strip() for part in page.title.split(' | ')]
-            if len(parts) >= 3 and re.fullmatch(r'Chapter\s+\d+(?:\.\d+)?', parts[0], re.I):
+            if len(parts) >= 3 and CHAPTER_LABEL.fullmatch(parts[0]):
                 title = f'{parts[1]} {parts[0]}'
             else:
                 title = page.title.removesuffix(' | Weeb Central').strip()
