@@ -26,12 +26,13 @@ from urllib.parse import urljoin, urlparse
 from PIL import Image
 from reportlab import rl_config
 from reportlab.lib.utils import ImageReader
+from reportlab.pdfbase.pdfdoc import PDFDictionary, PDFName, PDFStream
 from reportlab.pdfgen import canvas
 
 LOG = logging.getLogger("manga-leech")
 # PDF supports binary streams; ASCII85 would add about 25% to embedded JPEGs.
 rl_config.useA85 = False
-PDF_FORMAT_VERSION = "original-jpeg-v1"
+PDF_FORMAT_VERSION = "original-jpeg-series-title-v3"
 VOID_TAGS = {"img", "br", "hr", "input", "meta", "link", "source", "wbr", "area", "base", "embed", "param", "track", "col"}
 
 
@@ -44,6 +45,41 @@ class Chapter:
 def chapter_sort_key(chapter: Chapter):
     match = re.search(r'\bchapter\s+(\d+(?:\.\d+)?)', chapter.title, re.I)
     return (0, Decimal(match.group(1))) if match else (1, Decimal(0))
+
+
+def series_metadata(title: str):
+    matches = list(re.finditer(r'\bChapter\s+(\d+(?:\.\d+)?)(?=\s|$)', title, re.I))
+    if matches:
+        match = matches[-1]
+        series = title[:match.start()].strip()
+        if series:
+            return series, match.group(1)
+    return None, None
+
+
+def pdf_xmp(title: str) -> bytes:
+    ns = {
+        'x': 'adobe:ns:meta/',
+        'rdf': 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+        'dc': 'http://purl.org/dc/elements/1.1/',
+        'calibre': 'http://calibre-ebook.com/xmp-namespace',
+        'calibreSI': 'http://calibre-ebook.com/xmp-namespace-series-index',
+    }
+    for prefix, uri in ns.items():
+        ET.register_namespace(prefix, uri)
+    def tag(prefix, name):
+        return '{' + ns[prefix] + '}' + name
+    root = ET.Element(tag('x', 'xmpmeta'))
+    rdf = ET.SubElement(root, tag('rdf', 'RDF'))
+    description = ET.SubElement(rdf, tag('rdf', 'Description'), {tag('rdf', 'about'): ''})
+    title_node = ET.SubElement(description, tag('dc', 'title'))
+    alternative = ET.SubElement(title_node, tag('rdf', 'Alt'))
+    series, number = series_metadata(title)
+    ET.SubElement(alternative, tag('rdf', 'li'), {'{http://www.w3.org/XML/1998/namespace}lang': 'x-default'}).text = series or title
+    if series:
+        ET.SubElement(description, tag('calibre', 'series')).text = series
+        ET.SubElement(description, tag('calibreSI', 'series_index')).text = number
+    return ET.tostring(root, encoding='utf-8', xml_declaration=True)
 
 
 def http_url(value: str) -> str:
@@ -155,6 +191,17 @@ def safe_name(chapter: Chapter) -> str:
     title = unicodedata.normalize("NFKC", chapter.title)
     title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", title).strip(" .")[:120] or "chapter"
     return f"{title}-{hashlib.sha256(chapter.url.encode()).hexdigest()[:10]}"
+
+
+def pdf_name(chapter: Chapter) -> str:
+    series, number = series_metadata(chapter.title)
+    if not series:
+        return safe_name(chapter)
+    series = unicodedata.normalize('NFKC', series)
+    series = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', series).strip(' .')[:120] or 'series'
+    integer, separator, fraction = number.partition('.')
+    number = str(int(integer)).zfill(3) + (separator + fraction if separator else '')
+    return f'{series} - Ch {number}'
 
 
 class Client:
@@ -292,7 +339,12 @@ def make_pdf(images: list[Path], output: Path, title: str):
     temporary = output.with_suffix(".pdf.part")
     try:
         pdf = canvas.Canvas(str(temporary), pageCompression=1)
-        pdf.setTitle(title)
+        pdf.setTitle(series_metadata(title)[0] or title)
+        metadata = PDFStream(
+            PDFDictionary({'Type': PDFName('Metadata'), 'Subtype': PDFName('XML')}),
+            content=pdf_xmp(title), filters=[],
+        )
+        pdf._doc.Catalog.Metadata = metadata
         for path in images:
             with Image.open(path) as source:
                 # One original image per PDF page; keep aspect ratio and avoid PDF size limits.
@@ -310,12 +362,16 @@ def make_pdf(images: list[Path], output: Path, title: str):
         temporary.unlink(missing_ok=True)
 
 
-def finish_pdf(paths, pdf, title, manifest, signature):
+def finish_pdf(paths, pdf, title, manifest, signature, legacy_pdf=None):
     """Top-level function so Windows can run it in a spawned process."""
     make_pdf(paths, pdf, title)
     temporary = manifest.with_suffix(".sha256.part")
     temporary.write_text(signature)
     temporary.replace(manifest)
+    # Complete the filename migration only after the replacement PDF is ready.
+    if legacy_pdf is not None and legacy_pdf != pdf:
+        legacy_pdf.unlink(missing_ok=True)
+        legacy_pdf.with_suffix('.pages.sha256').unlink(missing_ok=True)
     return pdf
 
 
@@ -323,10 +379,11 @@ def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool
     if workers < 1:
         raise ValueError("Pocet vlaken musi byt alespon 1")
     name = safe_name(chapter)
-    pdf = output / f"{name}.pdf"
+    pdf = output / f"{pdf_name(chapter)}.pdf"
+    legacy_pdf = output / f"{name}.pdf"
     urls = image_urls(client.chapter_html(chapter.url), chapter.url)
-    signature = hashlib.sha256((PDF_FORMAT_VERSION + "\n" + "\n".join(urls)).encode()).hexdigest()
-    manifest = output / f"{name}.pages.sha256"
+    signature = hashlib.sha256((PDF_FORMAT_VERSION + "\n" + chapter.title + "\n" + "\n".join(urls)).encode()).hexdigest()
+    manifest = pdf.with_suffix('.pages.sha256')
     if pdf.exists() and manifest.exists() and manifest.read_text() == signature and not force:
         LOG.info("Preskakuji existujici PDF: %s", pdf.name)
         return
@@ -370,12 +427,18 @@ def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool
             raise
     if pdf_executor is not None:
         LOG.info("Predavam do tvorby PDF: %s", chapter.title)
-        return pdf_executor.submit(finish_pdf, paths, pdf, chapter.title, manifest, signature)
-    finish_pdf(paths, pdf, chapter.title, manifest, signature)
+        return pdf_executor.submit(finish_pdf, paths, pdf, chapter.title, manifest, signature, legacy_pdf)
+    finish_pdf(paths, pdf, chapter.title, manifest, signature, legacy_pdf)
     LOG.info("Hotovo: %s", pdf)
 
 
 def run_downloads(client, chapters, output, force, workers, pdf_workers):
+    names = {}
+    for chapter in chapters:
+        name = pdf_name(chapter).casefold()
+        if name in names and names[name] != chapter.url:
+            raise ValueError(f'Dve kapitoly maji stejny vystupni nazev: {pdf_name(chapter)}.pdf')
+        names[name] = chapter.url
     failures = 0
     pending = {}
 
@@ -444,7 +507,16 @@ def main(argv=None) -> int:
         client = Client(args.timeout, args.delay, args.user_agent)
         if args.chapter:
             url = http_url(args.chapter)
-            chapters = [Chapter("Chapter " + urlparse(url).path.rstrip("/").rsplit("/", 1)[-1], url)]
+            page = SeriesPage()
+            page.feed(client.get(url).decode('utf-8-sig'))
+            parts = [part.strip() for part in page.title.split(' | ')]
+            if len(parts) >= 3 and re.fullmatch(r'Chapter\s+\d+(?:\.\d+)?', parts[0], re.I):
+                title = f'{parts[1]} {parts[0]}'
+            else:
+                title = page.title.removesuffix(' | Weeb Central').strip()
+            if not title:
+                raise ValueError('Nelze zjistit nazev kapitoly pro metadata PDF.')
+            chapters = [Chapter(title, url)]
         else:
             source = http_url(args.feed)
             path = urlparse(source).path.rstrip("/")

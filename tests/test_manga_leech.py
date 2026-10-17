@@ -5,16 +5,61 @@ import threading
 import time
 import unittest
 import urllib.error
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from PIL import Image
 from pypdf import PdfReader
 
-from manga_leech import Chapter, Client, chapter_sort_key, download_chapter, finish_pdf, image_urls, make_pdf, parse_feed, run_downloads
+from manga_leech import Chapter, Client, chapter_sort_key, download_chapter, finish_pdf, image_urls, make_pdf, parse_feed, run_downloads, pdf_name, safe_name
 
 
 class Tests(unittest.TestCase):
+    def test_pdf_names(self):
+        for number, expected in [('0', '000'), ('25', '025'), ('104.1', '104.1'), ('1000', '1000')]:
+            self.assertEqual(pdf_name(Chapter(f'Overgeared Chapter {number}', 'https://example.org/c')), f'Overgeared - Ch {expected}')
+
+    def test_legacy_pdf_migration_uses_existing_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            chapter = Chapter('Overgeared Chapter 25', 'https://example.org/c')
+            image_url = 'https://example.org/page.png'
+            cache = root / '.images' / safe_name(chapter)
+            cache.mkdir(parents=True)
+            Image.new('RGB', (20, 40), 'red').save(cache / f'00001-{hashlib.sha256(image_url.encode()).hexdigest()[:12]}.img', format='PNG')
+            old = root / f'{safe_name(chapter)}.pdf'
+            old.write_bytes(b'legacy')
+            class CachedClient:
+                def chapter_html(self, url):
+                    return '<section id="chapter-images"><img src="/page.png" /></section>'
+                def get(self, *args):
+                    raise AssertionError('Must use image cache')
+            download_chapter(CachedClient(), chapter, root, False)
+            self.assertFalse(old.exists())
+            pdf = root / 'Overgeared - Ch 025.pdf'
+            self.assertEqual(PdfReader(pdf).metadata.title, 'Overgeared')
+
+    def test_kavita_xmp_groups_chapters_and_keeps_decimal_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / 'page.img'
+            Image.new('RGB', (20, 40), 'red').save(image, format='JPEG')
+            for number in ['1', '104.1']:
+                title = f'Čaroděj & <Dragon> Chapter {number}'
+                pdf = root / f'{number}.pdf'
+                make_pdf([image], pdf, title)
+                reader = PdfReader(pdf)
+                self.assertEqual(reader.metadata.title, 'Čaroděj & <Dragon>')
+                stream = reader.trailer['/Root']['/Metadata'].get_object()
+                self.assertEqual(stream['/Subtype'], '/XML')
+                xmp = ET.fromstring(stream.get_data())
+                self.assertEqual(xmp.find('.//{http://calibre-ebook.com/xmp-namespace}series').text, 'Čaroděj & <Dragon>')
+                self.assertEqual(xmp.find('.//{http://calibre-ebook.com/xmp-namespace-series-index}series_index').text, number)
+                self.assertEqual(xmp.find('.//{http://purl.org/dc/elements/1.1/}title/{http://www.w3.org/1999/02/22-rdf-syntax-ns#}Alt/{http://www.w3.org/1999/02/22-rdf-syntax-ns#}li').text, 'Čaroděj & <Dragon>')
+                embedded = next(iter(reader.pages[0]['/Resources']['/XObject'].values())).get_object()
+                self.assertEqual(embedded.get_data(), image.read_bytes())
+
     def test_slow_trickle_has_total_deadline_and_retries(self):
         client = Client(1, 0)
         response = MagicMock()

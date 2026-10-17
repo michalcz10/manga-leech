@@ -63,7 +63,7 @@ PDF se ukládají do `downloads/`. Ověřené obrázky zůstávají v `downloads
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Testy ověřují RSS/Atom, načtení úplného seznamu série místo náhledu, odstranění duplicit, chybu při chybějícím seznamu, načtení HTML fragmentu čtečky bez prohlížeče, pořadí a výběr obrázků, počet a rozměry PDF stran, navázání stahování a odmítnutí poškozených obrázků. Dále ověřují skutečný souběh stahování, zachování pořadí v PDF při opačném pořadí dokončení a samostatné HTTP klienty vláken. Testy také ověřují překryv tvorby PDF se stahováním další kapitoly, dokončení PDF před návratem, hlášení chyb tvorby PDF a skutečné spuštění PDF procesu. Testy navíc porovnávají vložené JPEG streamy s původními soubory (RGB, odstíny šedi i CMYK). Testy také simulují pomalý nepřetržitý přenos, HTTP 429 s opakováním a neúplnou odpověď. Všech 17 testů prošlo na dostupném Pythonu 3.12; Python 3.15 zde nebyl dostupný. Živě bylo dříve ověřeno načtení všech 225 položek série a také stažení všech 205 obrázků referenční kapitoly 1 do PDF s 205 stranami. Dostupnost serveru může kolísat; předchozí požadavky někdy vracely 403.
+Testy ověřují RSS/Atom, načtení úplného seznamu série místo náhledu, odstranění duplicit, chybu při chybějícím seznamu, načtení HTML fragmentu čtečky bez prohlížeče, pořadí a výběr obrázků, počet a rozměry PDF stran, navázání stahování a odmítnutí poškozených obrázků. Dále ověřují skutečný souběh stahování, zachování pořadí v PDF při opačném pořadí dokončení a samostatné HTTP klienty vláken. Testy také ověřují překryv tvorby PDF se stahováním další kapitoly, dokončení PDF před návratem, hlášení chyb tvorby PDF a skutečné spuštění PDF procesu. Testy navíc porovnávají vložené JPEG streamy s původními soubory (RGB, odstíny šedi i CMYK). Testy také simulují pomalý nepřetržitý přenos, HTTP 429 s opakováním a neúplnou odpověď. Testy také ověřují XMP metadata pro Kavitu, společnou sérii, desetinné indexy a XML escapování názvů. Testy ověřují také názvy souborů a migraci původních PDF z cache. Všech 20 testů prošlo na dostupném Pythonu 3.12; Python 3.15 zde nebyl dostupný. Živě bylo dříve ověřeno načtení všech 225 položek série a také stažení všech 205 obrázků referenční kapitoly 1 do PDF s 205 stranami. Dostupnost serveru může kolísat; předchozí požadavky někdy vracely 403.
 
 ## Referenční kapitola 1
 
@@ -92,3 +92,19 @@ Každý přenos má nejvýše tři pokusy. Chyby a číslo pokusu se vypisují. 
 Při HTTP 429 nebo 503 klient respektuje Retry-After (sekundy nebo HTTP datum) a nastaví společnou pauzu pro další požadavky všech vláken na stejný host. Již běžící požadavky doběhnou. Pokud server žádá pauzu delší než 120 s, požadavek selže s vysvětlením místo dlouhého čekání. Pro nezotavitelné selhání se nevytvoří neúplné PDF; ověřené obrázky zůstávají v cache a další kapitoly mohou pokračovat.
 
 Pro diagnostiku lze použít `--workers 2 --timeout 30`. Zaznamenané HTTP 429 potvrzuje omezení serverem; samotné čekání na poslední obrázek jeho příčinu nepotvrzuje.
+
+## Metadata pro Kavitu
+
+PDF obsahuje vedle běžného `/Title` také XMP metadata podle Calibre:
+
+- `/Title` i XMP `dc:title`: pouze název série, například `Overgeared`.
+- `calibre:series`: společný název série, například `The Greatest Estate Developer`.
+- `calibreSI:series_index`: číselný index vydání, například `1` nebo `104.1`.
+
+Kavita používá `calibre:series` pro seskupení; pokud chybí, může použít celý titul kapitoly a vytvořit samostatné série. Dle dokumentace Kavita mapuje `series_index` na Volume, nikoli samostatné pole Chapter. Zde je použit jako pořadí vydání v rámci série. PDF se ukládají jako `Overgeared - Ch 025.pdf`, kapitola 0 jako `Overgeared - Ch 000.pdf` a desetinná kapitola jako `Overgeared - Ch 104.1.pdf`. Číslo je doplněno na nejméně tři číslice a nemá hash. Hash zůstává pouze v interní cache, aby se využily již stažené obrázky. Pokud nelze určit sérii a číslo, použije se původní bezpečný název s hashem. Dvě rozdílné kapitoly se stejným cílovým názvem jsou odmítnuty místo vzájemného přepsání. Série se odvozuje z části názvu před posledním `Chapter číslo`. U přímého `--chapter` se skutečný název načítá z titulku stránky. Pokud název nemá rozpoznatelnou sérii a číslo kapitoly, zapíše se pouze titul; série se nevymýšlí.
+
+Dokumentace: https://wiki.kavitareader.com/guides/metadata/pdfs/ a https://wiki.kavitareader.com/guides/scanner/pdf/
+
+Starší PDF ve výstupní složce se při dalším spuštění běžného příkazu automaticky přestaví z ověřených obrázků v cache. Nepoužívejte `--force`, pokud nechcete znovu stahovat obrázky. Pro PDF již přesunutá na server je nutné aktualizované soubory nahradit nově vytvořenými. Poté spusťte nové skenování příslušné série v Kavitě. Metadata byla ověřena čtením výsledných PDF, včetně zachování původních JPEG streamů; běh na konkrétní instalaci Kavity zde nebyl ověřen.
+
+Při migraci se staré PDF s hashem ve výstupní složce odstraní až po úspěšném vytvoření nové verze se správným názvem a metadaty. Obrázky v cache zůstávají. Soubory přesunuté mimo výstupní složku se automaticky nemění.
