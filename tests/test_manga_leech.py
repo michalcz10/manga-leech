@@ -16,6 +16,29 @@ from manga_leech import Chapter, Client, SeriesPage, chapter_sort_key, download_
 
 
 class Tests(unittest.TestCase):
+    def test_inline_volume_series_without_show_all(self):
+        class InlineClient(Client):
+            def __init__(self):
+                self.calls = 0
+            def get(self, url, referer=None):
+                self.calls += 1
+                return b'<title>My Manga | Weeb Central</title><a href="/chapters/unrelated">Volume 99</a><div id="chapter-list"><div><a href="/chapters/three"><img src="badge" /><span>Volume 3</span></a></div><a href="/chapters/one">Volume 1</a><a href="/chapters/two">Vol. 2</a></div><a href="/chapters/outside">Volume 100</a>'
+        client = InlineClient()
+        chapters = sorted(client.series_chapters('https://example.org/series/abc/name'), key=chapter_sort_key)
+        self.assertEqual([pdf_name(c) for c in chapters], ['My Manga - Vol 001', 'My Manga - Vol 002', 'My Manga - Vol 003'])
+        self.assertEqual(client.calls, 1)
+
+    def test_volume_metadata_rss_and_decimal_names(self):
+        from manga_leech import pdf_xmp
+        for label in ['Volume', 'Volume.', 'Vol', 'Vol.']:
+            title = f'My Manga {label} 2.5'
+            rss = f'<rss><channel><item><title>{title}</title><link>/chapters/id</link></item></channel></rss>'.encode()
+            chapter = parse_feed(rss, 'https://example.org/rss')[0]
+            self.assertEqual(pdf_name(chapter), 'My Manga - Vol 002.5')
+            xmp = ET.fromstring(pdf_xmp(title))
+            self.assertEqual(xmp.find('.//{http://calibre-ebook.com/xmp-namespace}series').text, 'My Manga')
+            self.assertEqual(xmp.find('.//{http://calibre-ebook.com/xmp-namespace-series-index}series_index').text, '2.5')
+
     def test_page_labels_in_series_rss_and_names(self):
         page = SeriesPage()
         page.feed('<a href="/chapters/ten"><span>Page. 10</span><time>2026</time></a><a href="/chapters/one">Page. 1</a><a href="/chapters/half">Page 1.5</a>')

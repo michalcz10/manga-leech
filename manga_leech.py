@@ -32,8 +32,8 @@ from reportlab.pdfgen import canvas
 LOG = logging.getLogger("manga-leech")
 # PDF supports binary streams; ASCII85 would add about 25% to embedded JPEGs.
 rl_config.useA85 = False
-PDF_FORMAT_VERSION = "original-jpeg-series-title-v4"
-CHAPTER_LABEL = re.compile(r'\b(?:Chapter|Page)\.?\s+(\d+(?:\.\d+)?)(?=\s|$)', re.I)
+PDF_FORMAT_VERSION = "original-jpeg-series-title-v5"
+CHAPTER_LABEL = re.compile(r'\b(?:Chapter|Page|Volume|Vol)\.?\s+(\d+(?:\.\d+)?)(?=\s|$)', re.I)
 VOID_TAGS = {"img", "br", "hr", "input", "meta", "link", "source", "wbr", "area", "base", "embed", "param", "track", "col"}
 
 
@@ -127,9 +127,15 @@ class SeriesPage(HTMLParser):
         self.anchor = None
         self.text = []
         self.chapters = []
+        self.inline_chapters = []
+        self.stack = []
+        self.anchor_in_list = False
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
+        inside_list = any(self.stack) or attrs.get('id') == 'chapter-list'
+        if tag not in VOID_TAGS:
+            self.stack.append(inside_list)
         endpoint = attrs.get("hx-get", "")
         if urlparse(endpoint).path.endswith("/full-chapter-list"):
             self.full_list = endpoint
@@ -138,6 +144,7 @@ class SeriesPage(HTMLParser):
         if tag == "a":
             self.anchor = attrs.get("href")
             self.text = []
+            self.anchor_in_list = inside_list
 
     def handle_data(self, data):
         if self.in_title:
@@ -153,8 +160,13 @@ class SeriesPage(HTMLParser):
                 text = " ".join(" ".join(self.text).split())
                 match = CHAPTER_LABEL.search(text)
                 if match:
-                    self.chapters.append(Chapter(match.group(), self.anchor))
+                    chapter = Chapter(match.group(), self.anchor)
+                    self.chapters.append(chapter)
+                    if self.anchor_in_list:
+                        self.inline_chapters.append(chapter)
             self.anchor = None
+        if tag not in VOID_TAGS and self.stack:
+            self.stack.pop()
 
 
 class ReaderImages(HTMLParser):
@@ -203,7 +215,9 @@ def pdf_name(chapter: Chapter) -> str:
     series = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', series).strip(' .')[:120] or 'series'
     integer, separator, fraction = number.partition('.')
     number = str(int(integer)).zfill(3) + (separator + fraction if separator else '')
-    return f'{series} - Ch {number}'
+    label = list(CHAPTER_LABEL.finditer(chapter.title))[-1].group()
+    kind = 'Vol' if re.match(r'Vol', label, re.I) else 'Ch'
+    return f'{series} - {kind} {number}'
 
 
 class Client:
@@ -309,16 +323,21 @@ class Client:
     def series_chapters(self, url: str) -> list[Chapter]:
         page = SeriesPage()
         page.feed(self.get(url).decode("utf-8-sig"))
-        if not page.full_list:
+        if not page.full_list and not page.inline_chapters:
             raise ValueError("Na strance serie chybi odkaz na uplny seznam kapitol; nebudu stahovat pouze nahled.")
-        endpoint = http_url(urljoin(url, page.full_list))
-        if urlparse(endpoint).netloc != urlparse(url).netloc:
-            raise ValueError("Uplny seznam kapitol odkazuje na jinou domenu.")
-        listing = SeriesPage()
-        listing.feed(self.get(endpoint, url).decode("utf-8-sig"))
+        if page.full_list:
+            endpoint = http_url(urljoin(url, page.full_list))
+            if urlparse(endpoint).netloc != urlparse(url).netloc:
+                raise ValueError("Uplny seznam kapitol odkazuje na jinou domenu.")
+            listing = SeriesPage()
+            listing.feed(self.get(endpoint, url).decode("utf-8-sig"))
+            entries = listing.chapters
+        else:
+            # Short series have their full list inline and no Show All button.
+            entries = page.inline_chapters
         name = page.title.split(" | ")[0].strip()
         chapters = {}
-        for chapter in listing.chapters:
+        for chapter in entries:
             link = http_url(urljoin(url, chapter.url))
             if urlparse(link).netloc != urlparse(url).netloc:
                 raise ValueError("Kapitola odkazuje na jinou domenu.")

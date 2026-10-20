@@ -34,7 +34,7 @@ Stahování používá standardní Python HTTP klient (`urllib`), podobně jako 
 
 Pokud server vrací HTTP 403, odmítá daný požadavek. Aplikace nespouští JavaScript ani neřeší CAPTCHA nebo přihlášení. Vlastní identifikaci HTTP klienta lze nastavit pomocí `--user-agent "MujKlient/1.0"`.
 
-URL série se rozpozná automaticky a aplikace načte úplný seznam odkazovaný tlačítkem „Show All Chapters“. U uvedené série bylo ověřeno 225 položek, seřazených od kapitoly 1. Pokud odkaz na úplný seznam chybí nebo je seznam prázdný, aplikace ohlásí chybu místo použití neúplného náhledu. `--limit 1` zde vybere kapitolu 1.
+URL série se rozpozná automaticky a aplikace načte úplný seznam odkazovaný tlačítkem „Show All Chapters“. U uvedené série bylo ověřeno 225 položek, seřazených od kapitoly 1. Pokud odkaz na úplný seznam chybí, použije se seznam přímo ze sekce `#chapter-list` (krátké série tlačítko Show All nemají). Odkazy mimo tuto sekci se nepoužijí. Pokud chybí obojí nebo je seznam prázdný, aplikace ohlásí chybu. `--limit 1` zde vybere kapitolu 1.
 
 RSS je seznam posledních vydání, nikoli archiv celé série. Při ověření obsahoval uvedený feed 20 položek (kapitoly 204–223). Při zadání RSS aplikace zpracuje pouze obsah feedu; pro celý archiv zadejte URL série.
 
@@ -63,7 +63,7 @@ PDF se ukládají do `downloads/`. Ověřené obrázky zůstávají v `downloads
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Testy ověřují RSS/Atom, načtení úplného seznamu série místo náhledu, odstranění duplicit, chybu při chybějícím seznamu, načtení HTML fragmentu čtečky bez prohlížeče, pořadí a výběr obrázků, počet a rozměry PDF stran, navázání stahování a odmítnutí poškozených obrázků. Dále ověřují skutečný souběh stahování, zachování pořadí v PDF při opačném pořadí dokončení a samostatné HTTP klienty vláken. Testy také ověřují překryv tvorby PDF se stahováním další kapitoly, dokončení PDF před návratem, hlášení chyb tvorby PDF a skutečné spuštění PDF procesu. Testy navíc porovnávají vložené JPEG streamy s původními soubory (RGB, odstíny šedi i CMYK). Testy také simulují pomalý nepřetržitý přenos, HTTP 429 s opakováním a neúplnou odpověď. Testy také ověřují XMP metadata pro Kavitu, společnou sérii, desetinné indexy a XML escapování názvů. Testy ověřují také názvy souborů a migraci původních PDF z cache. Testy pokrývají také označení Page/Page. v seznamu série a RSS, názvy souborů i metadata PDF. Všech 22 testů prošlo na dostupném Pythonu 3.12; Python 3.15 zde nebyl dostupný. Živě bylo dříve ověřeno načtení všech 225 položek série a také stažení všech 205 obrázků referenční kapitoly 1 do PDF s 205 stranami. Dostupnost serveru může kolísat; předchozí požadavky někdy vracely 403.
+Testy ověřují RSS/Atom, načtení úplného seznamu série místo náhledu, odstranění duplicit, chybu při chybějícím seznamu, načtení HTML fragmentu čtečky bez prohlížeče, pořadí a výběr obrázků, počet a rozměry PDF stran, navázání stahování a odmítnutí poškozených obrázků. Dále ověřují skutečný souběh stahování, zachování pořadí v PDF při opačném pořadí dokončení a samostatné HTTP klienty vláken. Testy také ověřují překryv tvorby PDF se stahováním další kapitoly, dokončení PDF před návratem, hlášení chyb tvorby PDF a skutečné spuštění PDF procesu. Testy navíc porovnávají vložené JPEG streamy s původními soubory (RGB, odstíny šedi i CMYK). Testy také simulují pomalý nepřetržitý přenos, HTTP 429 s opakováním a neúplnou odpověď. Testy také ověřují XMP metadata pro Kavitu, společnou sérii, desetinné indexy a XML escapování názvů. Testy ověřují také názvy souborů a migraci původních PDF z cache. Testy pokrývají také označení Page/Page. v seznamu série a RSS, názvy souborů i metadata PDF. Testy také ověřují svazky Volume/Vol. a krátké seznamy přímo na stránce. Všech 24 testů prošlo na dostupném Pythonu 3.12; Python 3.15 zde nebyl dostupný. Živě bylo dříve ověřeno načtení všech 225 položek série a také stažení všech 205 obrázků referenční kapitoly 1 do PDF s 205 stranami. Dostupnost serveru může kolísat; předchozí požadavky někdy vracely 403.
 
 ## Referenční kapitola 1
 
@@ -118,3 +118,9 @@ Položky `Page 1` i `Page. 1` se zpracují stejně jako `Chapter 1`: číselné 
 ```powershell
 .\.venv\Scripts\python.exe manga_leech.py "https://weebcentral.com/series/01J76XY7PBJ0A3GC5PC79VET42/Horimiya"
 ```
+
+## Svazky Volume / Vol.
+
+Parser podporuje `Volume 1`, `Volume. 1`, `Vol 1` a `Vol. 1` ve stránce série, RSS i přímé kapitole. Svazky se řadí číselně a ukládají jako `Název série - Vol 001.pdf` (desetinný index např. `Vol 002.5`). PDF Title a XMP série obsahují pouze název série. Kapitoly a položky Page dál používají `Ch`.
+
+U série „The Guy She Was Interested In Wasn't a Guy at All“ bylo živě ověřeno načtení všech tří svazků z vloženého seznamu přímo na stránce, bez tlačítka Show All Chapters. Použít lze stejný příkaz jako pro ostatní série.
