@@ -13,6 +13,42 @@ py -3.15 -m venv .venv
 
 Stahování používá standardní Python HTTP klient (`urllib`), podobně jako curl/wget. Prohlížeč ani Playwright nejsou potřeba. Přesměrování a cookies v rámci běhu se zpracují automaticky.
 
+## Instalace (Linux)
+
+Příkazy spouštějte ve složce projektu, kde jsou `manga_leech.py` a `requirements.txt`. Projekt počítá s Pythonem 3.15; aplikace a testy byly ověřeny také na Pythonu 3.12. Verzi dostupného Pythonu zjistíte pomocí `python3 --version`. Pokud máte Python 3.15 nainstalovaný zvlášť, použijte při vytváření prostředí `python3.15` místo `python3`.
+
+Na Debianu / Ubuntu nejprve nainstalujte Python a podporu virtuálních prostředí:
+
+```bash
+sudo apt update
+sudo apt install python3 python3-venv python3-pip
+```
+
+Na ostatních distribucích nainstalujte odpovídající balíčky jejich správcem balíčků. Potom vytvořte virtuální prostředí a nainstalujte závislosti:
+
+```bash
+python3 -m venv .venv
+./.venv/bin/python -m pip install -r requirements.txt
+```
+
+Spuštění celé série se souběžným stahováním a tvorbou PDF:
+
+```bash
+./.venv/bin/python manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer" --workers 7 --pdf-workers 1
+```
+
+Pro pouhý seznam přidejte `--list`, pro zkušební stažení prvního vydání `--limit 1`. PDF se ukládají do `downloads/`, pokud nezadáte jinou složku přes `-o`.
+
+Aktivace prostředí je volitelná. Pokud chcete místo celé cesty používat jen `python`:
+
+```bash
+source .venv/bin/activate
+python manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer" --list
+deactivate
+```
+
+Závislosti instalujte do virtuálního prostředí bez `sudo pip`. Prohlížeč, Playwright ani externí program pro tvorbu PDF nejsou potřeba.
+
 ## Použití
 
 ```powershell
