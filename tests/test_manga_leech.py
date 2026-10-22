@@ -24,8 +24,8 @@ def record_pdf_worker(*args):
 
 
 class Tests(unittest.TestCase):
-    def test_pdf_worker_recycled_after_each_task(self):
-        # Dva úkoly s jediným workerem musí proběhnout v různých procesech.
+    def test_pdf_worker_recycled_at_configured_interval(self):
+        # Pět úkolů ověří opakované použití i přechod přes dvě hranice recyklace.
         data = io.BytesIO()
         Image.new('RGB', (20, 40), 'red').save(data, format='PNG')
         class FakeClient:
@@ -35,12 +35,14 @@ class Tests(unittest.TestCase):
                 return data.getvalue()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            chapters = [Chapter(f'Test Chapter {i}', f'https://example.org/{i}') for i in [1, 2]]
+            chapters = [Chapter(f'Test Chapter {i}', f'https://example.org/{i}') for i in range(1, 6)]
             with patch('manga_leech.finish_pdf', record_pdf_worker):
-                self.assertEqual(run_downloads(FakeClient(), chapters, root, False, 2, 1), 0)
-            pids = [path.read_text() for path in root.glob('*.pid')]
-            self.assertEqual(len(pids), 2)
-            self.assertEqual(len(set(pids)), 2)
+                self.assertEqual(run_downloads(FakeClient(), chapters, root, False, 2, 1, pdf_tasks_per_child=2), 0)
+            pids = [path.read_text() for path in sorted(root.glob('*.pid'))]
+            self.assertEqual(len(pids), 5)
+            self.assertEqual(pids[0], pids[1])
+            self.assertEqual(pids[2], pids[3])
+            self.assertEqual(len(set(pids)), 3)
 
     def test_png_transparency_preserved(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -7,12 +7,15 @@ takže stahování další kapitoly může pokračovat během tvorby předchozí
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import io
 import http.cookiejar
 import http.client
 import logging
+import math
 import re
+import struct
 import sys
 import threading
 import time
@@ -21,6 +24,7 @@ import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from contextlib import nullcontext
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, wait, FIRST_COMPLETED
 from decimal import Decimal
 from email.utils import parsedate_to_datetime
@@ -29,16 +33,19 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 from PIL import Image
+import requests
+from urllib3.exceptions import HTTPError as TransportError
 from reportlab import rl_config
 from reportlab.lib.utils import ImageReader
-from reportlab.pdfbase.pdfdoc import PDFDictionary, PDFName, PDFStream, PDFImageXObject
+from reportlab.pdfbase.pdfdoc import PDFArray, PDFDictionary, PDFName, PDFStream, PDFString, PDFImageXObject
 from reportlab.pdfgen import canvas
 
 LOG = logging.getLogger("manga-leech")
 # PDF umí binární streamy; ASCII85 by zbytečně zvětšilo vložené JPEG asi o 25 %.
 rl_config.useA85 = False
 # Při změně formátu zvýšíme verzi: stará PDF se přestaví z existující cache.
-PDF_FORMAT_VERSION = "original-jpeg-series-title-v5"
+PDF_FORMAT_VERSION = "lossless-png-dedup-v6"
+IMAGE_CHECK_VERSION = "decoded-v1"
 # Jednotný filtr vydání pro seznam série, RSS, řazení, názvy souborů a metadata.
 # Episode i německé Kapitel se zpracují jako kapitola (Ch); Volume/Vol používá Vol.
 CHAPTER_LABEL = re.compile(r'\b(?:Chapter|Page|Volume|Vol|Episode|Kapitel)\.?\s+(\d+(?:\.\d+)?)(?=\s|$)', re.I)
@@ -246,6 +253,50 @@ def pdf_name(chapter: Chapter) -> str:
     return f'{series} - {kind} {number}'
 
 
+class PooledResponse:
+    """Streamovaná odpověď: read1 zachová kontrolu času i při pomalém přenosu."""
+    def __init__(self, response):
+        self.response = response
+        self.headers = response.headers
+
+    def read1(self, size):
+        try:
+            return self.response.raw.read1(size, decode_content=False)
+        except TransportError as exc:
+            raise OSError(str(exc)) from exc
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.response.close()
+
+
+class PooledOpener:
+    """Jedna Session na vlákno; cookies jsou společné celému klientu."""
+    def __init__(self, cookies):
+        self.session = requests.Session()
+        self.session.cookies = cookies
+        for scheme in ('http://', 'https://'):
+            self.session.mount(scheme, requests.adapters.HTTPAdapter(
+                pool_connections=4, pool_maxsize=1, pool_block=True, max_retries=0))
+
+    def open(self, request, timeout):
+        try:
+            response = self.session.get(request.full_url, headers=dict(request.header_items()),
+                                        timeout=timeout, stream=True)
+        except requests.RequestException as exc:
+            raise OSError(str(exc)) from exc
+        if response.status_code >= 400:
+            response.close()
+            raise urllib.error.HTTPError(response.url, response.status_code,
+                                         response.reason, response.headers, None)
+        return PooledResponse(response)
+
+    def close(self):
+        self.session.close()
+
+
 class Client:
     """HTTP klient se sdílenými cookies, opakováním požadavků a pauzami pro hosty."""
     def __init__(self, timeout: float, delay: float, user_agent: str = "MangaLeech/0.1"):
@@ -255,6 +306,9 @@ class Client:
         self.local = threading.local()
         self.cooldown_lock = threading.Lock()
         self.cooldowns = {}
+        self.openers = []
+        self.openers_lock = threading.Lock()
+        self.prefetched_html = {}
 
     def wait_for_host(self, host):
         """Počká na konec společné pauzy hostu; zámek nedrží během spánku."""
@@ -270,7 +324,8 @@ class Client:
         value = headers.get("Retry-After") if headers else None
         if value:
             try:
-                return max(0, float(value))
+                seconds = float(value)
+                return max(0, seconds) if math.isfinite(seconds) else fallback
             except ValueError:
                 try:
                     return max(0, parsedate_to_datetime(value).timestamp() - time.time())
@@ -279,28 +334,44 @@ class Client:
         return fallback
 
     def thread_opener(self):
-        # Každé vlákno má vlastní opener; přístup ke sdílené CookieJar se zamyká uvnitř knihovny.
         if not hasattr(self.local, "opener"):
-            self.local.opener = urllib.request.build_opener(
-                urllib.request.HTTPCookieProcessor(self.cookies)
-            )
+            self.local.opener = PooledOpener(self.cookies)
+            with self.openers_lock:
+                self.openers.append(self.local.opener)
         return self.local.opener
 
+    def close(self):
+        """Volat až po doběhnutí download vláken."""
+        for opener in self.openers:
+            opener.close()
+        self.openers.clear()
+
     def get(self, url: str, referer: str | None = None) -> bytes:
+        with io.BytesIO() as target:
+            self._transfer(url, referer, target)
+            return target.getvalue()
+
+    def download(self, url: str, path: Path, referer: str | None = None):
+        """Velký obrázek zapisuje přímo do dočasného souboru, bez kopie v RAM."""
+        with path.open('wb') as target:
+            self._transfer(url, referer, target)
+
+    def _transfer(self, url, referer, target):
         """Stáhne odpověď s nejvýše třemi pokusy; neúplné přenosy nepřijme."""
-        headers = {"User-Agent": self.user_agent, "Accept": "*/*"}
+        headers = {"User-Agent": self.user_agent, "Accept": "*/*", "Accept-Encoding": "identity"}
         if referer:
             headers["Referer"] = referer
         host = urlparse(http_url(url)).netloc
         for attempt in range(3):
-            self.wait_for_host(host)
             time.sleep(self.delay)
+            self.wait_for_host(host)
+            target.seek(0)
+            target.truncate()
             try:
                 started = time.monotonic()
                 # Socket timeout hlídá nečinnost, monotonic navíc celkovou dobu přenosu.
                 # Jedno blokující čtení může celkový limit překročit o svůj timeout.
                 with self.thread_opener().open(urllib.request.Request(url, headers=headers), timeout=min(10, self.timeout)) as response:
-                    chunks = []
                     received = 0
                     while True:
                         if time.monotonic() - started >= self.timeout:
@@ -308,12 +379,12 @@ class Client:
                         chunk = response.read1(64 * 1024)
                         if not chunk:
                             break
-                        chunks.append(chunk)
+                        target.write(chunk)
                         received += len(chunk)
                     expected = response.headers.get("Content-Length")
                     if expected is not None and received != int(expected):
                         raise http.client.IncompleteRead(b"", int(expected) - received)
-                    return b"".join(chunks)
+                    return
             except urllib.error.HTTPError as exc:
                 status = exc.code
                 pause = self.retry_delay(exc.headers, 2 ** (attempt + 1))
@@ -321,11 +392,11 @@ class Client:
                 LOG.warning("HTTP %d: %s (pokus %d/3)", status, url, attempt + 1)
                 if status not in {429, 500, 502, 503, 504} or attempt == 2:
                     raise
+                if pause > 120:
+                    LOG.error("Server pozaduje pauzu %.0f s; kapitola selze misto dlouheho cekani. Zkuste pozdeji.", pause)
+                    raise
                 # Pauza platí i pro další požadavky ostatních vláken na stejný host.
                 if status in {429, 503}:
-                    if pause > 120:
-                        LOG.error("Server pozaduje pauzu %.0f s; kapitola selze misto dlouheho cekani. Zkuste pozdeji.", pause)
-                        raise
                     with self.cooldown_lock:
                         self.cooldowns[host] = max(self.cooldowns.get(host, 0), time.monotonic() + pause)
                 LOG.warning("Opakuji za %.1f s: %s", pause, url)
@@ -339,7 +410,9 @@ class Client:
 
     def chapter_html(self, url: str) -> str:
         """Načte čtečku a případně její HTML fragment s kompletním seznamem obrázků."""
-        html = self.get(url).decode("utf-8-sig")
+        html = getattr(self, 'prefetched_html', {}).pop(url, None)
+        if html is None:
+            html = self.get(url).decode("utf-8-sig")
         # Stejný GET jako v čtečce webu; pro získání fragmentu není třeba JavaScript.
         if not re.search(r'id=["\']chapter-images["\'][^>]*>\s*<img', html):
             match = re.search(r'["\']([^"\']+/images\?is_prev=False)["\']', html)
@@ -381,27 +454,44 @@ class Client:
         return list(chapters.values())
 
 
-def valid_image(path: Path) -> bool:
-    """Ověří existenci a strukturu obrázku před opětovným použitím cache."""
+def file_digest(path: Path) -> str:
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def validate_image(path: Path):
+    """Ověří strukturu i dekódování; samotné verify JPEG payload nekontroluje."""
+    with Image.open(path) as image:
+        image.verify()
+    with Image.open(path) as image:
+        image.load()
+
+
+def image_receipt(path: Path, digest: str):
+    receipt = path.with_suffix('.verified')
+    temporary = receipt.with_suffix('.verified.part')
     try:
-        with Image.open(path) as image:
-            image.verify()
+        temporary.write_text(IMAGE_CHECK_VERSION + '\n' + digest, encoding='ascii')
+        temporary.replace(receipt)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def valid_image(path: Path) -> bool:
+    """Stará cache se dekóduje jednou, ověřená se porovná podle obsahu."""
+    try:
+        digest = file_digest(path)
+        receipt = path.with_suffix('.verified')
+        if receipt.exists() and receipt.read_text(encoding='ascii') == IMAGE_CHECK_VERSION + '\n' + digest:
+            return True
+        validate_image(path)
+        image_receipt(path, digest)
         return True
-    except (OSError, ValueError):
+    except (OSError, ValueError, UnicodeError):
         return False
 
 
-def draw_jpeg(pdf, path: Path, width, height):
-    """Vloží JPEG přímo jako XObject, bez rozbalení pixelů pro otisk ImageReader."""
-    # drawImage(ImageReader(...)) volá getRGBData i při zachování JPEG komprese.
-    # Identifikujeme proto objekt cestou a přečteme pouze JPEG hlavičku a stream.
-    name = 'jpeg_' + hashlib.sha256(str(path).encode()).hexdigest()
-    if pdf._doc.getXObjectName(name) not in pdf._doc.idToObject:
-        image = PDFImageXObject(name)
-        with path.open('rb') as stream:
-            if not image.loadImageFromJPEG(stream):
-                raise ValueError(f'Nelze precist JPEG: {path}')
-        pdf._doc.addForm(name, image)
+def draw_xobject(pdf, name, width, height):
     pdf._currentPageHasImages = 1
     pdf.saveState()
     pdf.scale(width, height)
@@ -409,11 +499,100 @@ def draw_jpeg(pdf, path: Path, width, height):
     pdf.restoreState()
 
 
-def make_pdf(images: list[Path], output: Path, title: str):
+def draw_jpeg(pdf, path: Path, width, height, data=None):
+    """Vloží JPEG přímo jako XObject, bez rozbalení pixelů pro otisk ImageReader."""
+    # drawImage(ImageReader(...)) volá getRGBData i při zachování JPEG komprese.
+    # Hash komprimovaného obsahu deduplikuje stejné stránky pod různými URL.
+    name = 'jpeg_' + (hashlib.sha256(data).hexdigest() if data is not None else file_digest(path))
+    if pdf._doc.getXObjectName(name) not in pdf._doc.idToObject:
+        image = PDFImageXObject(name)
+        with (io.BytesIO(data) if data is not None else path.open('rb')) as stream:
+            if not image.loadImageFromJPEG(stream):
+                raise ValueError(f'Nelze precist JPEG: {path}')
+        pdf._doc.addForm(name, image)
+    draw_xobject(pdf, name, width, height)
+
+
+def png_stream(data):
+    """Původní PNG IDAT jako PDF Flate + PNG predictor, bez rozbalení pixelů.
+
+    Pro alpha/tRNS a interlacing vrátí None; ty zpracuje ověřená cesta Pillow.
+    """
+    if not data.startswith(b'\x89PNG\r\n\x1a\n'):
+        return None
+    offset, chunks, palette, header = 8, [], None, None
+    while offset + 12 <= len(data):
+        length = struct.unpack_from('>I', data, offset)[0]
+        kind = data[offset + 4:offset + 8]
+        payload = data[offset + 8:offset + 8 + length]
+        if len(payload) != length:
+            return None
+        if kind == b'IHDR':
+            header = struct.unpack('>IIBBBBB', payload)
+        elif kind == b'PLTE':
+            palette = payload
+        elif kind == b'tRNS':
+            return None
+        elif kind == b'IDAT':
+            chunks.append(payload)
+        elif kind == b'IEND':
+            break
+        offset += length + 12
+    if header is None or not chunks:
+        return None
+    width, height, bits, color, compression, filtering, interlaced = header
+    if color not in (0, 2, 3) or interlaced or compression or filtering:
+        return None
+    colorspace = PDFName('DeviceRGB' if color == 2 else 'DeviceGray')
+    if color == 3:
+        if not palette:
+            return None
+        colorspace = PDFArray([PDFName('Indexed'), PDFName('DeviceRGB'),
+                               len(palette) // 3 - 1, PDFString(palette, enc='raw')])
+    return PDFStream(PDFDictionary({
+        'Type': PDFName('XObject'), 'Subtype': PDFName('Image'),
+        'Width': width, 'Height': height, 'BitsPerComponent': bits,
+        'ColorSpace': colorspace, 'Filter': PDFName('FlateDecode'),
+        'DecodeParms': PDFDictionary({'Predictor': 15, 'Colors': 3 if color == 2 else 1,
+                                      'BitsPerComponent': bits, 'Columns': width}),
+    }), content=b''.join(chunks), filters=[])
+
+
+def draw_lossless(pdf, source, path, width, height, jpeg_quality=None):
+    data = path.read_bytes() if source.format == 'PNG' else None
+    stream = png_stream(data) if data is not None else None
+    if stream is None and source.mode in ('1', 'P', 'L', 'RGB') and 'transparency' not in source.info:
+        buffer = io.BytesIO()
+        source.save(buffer, format='PNG')
+        data = buffer.getvalue()
+        stream = png_stream(data)
+    if stream is not None:
+        # Ztrátový převod je explicitní a netýká se jednobitových/paletových stran.
+        if jpeg_quality is not None and source.mode in ('L', 'RGB') and 'transparency' not in source.info:
+            buffer = io.BytesIO()
+            source.save(buffer, format='JPEG', quality=jpeg_quality, optimize=True)
+            jpeg = buffer.getvalue()
+            if len(jpeg) < len(stream.content):
+                draw_jpeg(pdf, path, width, height, data=jpeg)
+                return
+        name = 'png_' + hashlib.sha256(data).hexdigest()
+        if pdf._doc.getXObjectName(name) not in pdf._doc.idToObject:
+            pdf._doc.addForm(name, stream)
+        draw_xobject(pdf, name, width, height)
+    else:
+        # ImageReader sám neumí všechny PNG tRNS varianty (zejména L a RGB).
+        if 'transparency' in source.info:
+            with source.convert('RGBA') as rgba:
+                pdf.drawImage(ImageReader(rgba), 0, 0, width=width, height=height, mask='auto')
+        else:
+            pdf.drawImage(ImageReader(source), 0, 0, width=width, height=height, mask='auto')
+
+
+def make_pdf(images: list[Path], output: Path, title: str, jpeg_quality=None):
     """Vytvoří jednu PDF stránku na obrázek a hotový soubor atomicky přejmenuje."""
     temporary = output.with_suffix(".pdf.part")
     try:
-        pdf = canvas.Canvas(str(temporary), pageCompression=1)
+        pdf = canvas.Canvas(str(temporary), pageCompression=1, pdfVersion=(1, 5))
         pdf.setTitle(series_metadata(title)[0] or title)
         metadata = PDFStream(
             PDFDictionary({'Type': PDFName('Metadata'), 'Subtype': PDFName('XML')}),
@@ -429,16 +608,12 @@ def make_pdf(images: list[Path], output: Path, title: str):
                 scale = min(0.75, 14000 / max(width, height))
                 w, h = width * scale, height * scale
                 pdf.setPageSize((w, h))
-                # JPEG nevyžaduje dekódování pixelů. Ostatní formáty (např. PNG
-                # s průhledností) zpracuje ImageReader, ale pouze po jednom obrázku.
+                # JPEG i kompatibilní PNG zachovají komprimované streamy.
+                # Ostatní formáty a průhlednost se zpracují po jednom obrázku.
                 if source.format == 'JPEG':
                     draw_jpeg(pdf, path, w, h)
                 else:
-                    reader = ImageReader(source)
-                    try:
-                        pdf.drawImage(reader, 0, 0, width=w, height=h, mask="auto")
-                    finally:
-                        del reader
+                    draw_lossless(pdf, source, path, w, h, jpeg_quality)
                 pdf.showPage()
         pdf.save()
         temporary.replace(output)
@@ -446,13 +621,20 @@ def make_pdf(images: list[Path], output: Path, title: str):
         temporary.unlink(missing_ok=True)
 
 
-def finish_pdf(paths, pdf, title, manifest, signature, legacy_pdf=None):
+def finish_pdf(paths, pdf, title, manifest, signature, legacy_pdf=None, jpeg_quality=None):
     """Dokončí PDF a volitelný otisk; funkce na úrovni modulu funguje i v procesu na Windows."""
-    make_pdf(paths, pdf, title)
+    try:
+        make_pdf(paths, pdf, title, jpeg_quality)
+    finally:
+        # ReportLab vytváří cykly; dlouho žijící worker je nesmí držet do další dávky.
+        gc.collect()
     if manifest is not None:
         temporary = manifest.with_suffix(".sha256.part")
         temporary.write_text(signature)
         temporary.replace(manifest)
+    else:
+        # Starý otisk nesmí potvrdit nově přestavěné PDF s jinou kvalitou.
+        pdf.with_suffix('.pages.sha256').unlink(missing_ok=True)
     # Staré PDF s hashem odstraníme až po dokončení nové verze a případného otisku.
     if legacy_pdf is not None and legacy_pdf != pdf:
         legacy_pdf.unlink(missing_ok=True)
@@ -460,7 +642,9 @@ def finish_pdf(paths, pdf, title, manifest, signature, legacy_pdf=None):
     return pdf
 
 
-def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool, workers: int = 4, pdf_executor=None, write_manifest: bool = False):
+def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool, workers: int = 4,
+                     pdf_executor=None, write_manifest: bool = False, image_executor=None,
+                     jpeg_quality=None, rebuild=False):
     """Stáhne obrázky vydání a vytvoří PDF, nebo vrátí Future z PDF procesu.
 
     Hotová PDF přeskakuje (vrací None); kontrola aktuálnosti otiskem je volitelná. Interní cache zůstává ve starém
@@ -471,15 +655,15 @@ def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool
     name = safe_name(chapter)
     pdf = output / f"{pdf_name(chapter)}.pdf"
     legacy_pdf = output / f"{name}.pdf"
-    # Bez otisku má existence PDF význam „hotovo“; aktualizaci vyžádá --force.
-    if pdf.exists() and not force and not write_manifest:
+    # Bez otisku má existence PDF význam „hotovo“; obnovu vyžádá --rebuild/--force.
+    if pdf.exists() and not force and not rebuild and not write_manifest:
         LOG.info("Preskakuji existujici PDF: %s", pdf.name)
         return
     urls = image_urls(client.chapter_html(chapter.url), chapter.url)
     # Otisk váže PDF na verzi generátoru, metadata a aktuální pořadí obrázků.
-    signature = hashlib.sha256((PDF_FORMAT_VERSION + "\n" + chapter.title + "\n" + "\n".join(urls)).encode()).hexdigest() if write_manifest else None
+    signature = hashlib.sha256((PDF_FORMAT_VERSION + f"\njpeg_quality={jpeg_quality}\n" + chapter.title + "\n" + "\n".join(urls)).encode()).hexdigest() if write_manifest else None
     manifest = pdf.with_suffix('.pages.sha256') if write_manifest else None
-    if pdf.exists() and manifest is not None and manifest.exists() and manifest.read_text() == signature and not force:
+    if pdf.exists() and manifest is not None and manifest.exists() and manifest.read_text() == signature and not force and not rebuild:
         LOG.info("Preskakuji existujici PDF: %s", pdf.name)
         return
     cache = output / ".images" / name
@@ -488,18 +672,25 @@ def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool
         key = hashlib.sha256(url.encode()).hexdigest()[:12]
         path = cache / f"{index:05d}-{key}.img"
         if force or not valid_image(path):
-            data = client.get(url, chapter.url)
-            # Do cache uložíme pouze ověřený obrázek, nikoli HTML chyby vrácené serverem.
-            with Image.open(io.BytesIO(data)) as image:
-                image.verify()
             temporary = path.with_suffix(".part")
-            temporary.write_bytes(data)
-            temporary.replace(path)
+            try:
+                if hasattr(client, 'download'):
+                    client.download(url, temporary, chapter.url)
+                else:
+                    # Jednoduché alternativní klienty mohou poskytovat pouze get.
+                    temporary.write_bytes(client.get(url, chapter.url))
+                validate_image(temporary)
+                digest = file_digest(temporary)
+                temporary.replace(path)
+                image_receipt(path, digest)
+            finally:
+                temporary.unlink(missing_ok=True)
         return path
 
     # Obrázky mohou dorazit různě rychle; cesty ukládáme podle původního indexu.
     paths = [None] * len(urls)
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="image") as executor:
+    with (nullcontext(image_executor) if image_executor is not None else
+          ThreadPoolExecutor(max_workers=workers, thread_name_prefix="image")) as executor:
         pending = {executor.submit(download_image, index, url): index for index, url in enumerate(urls, 1)}
         try:
             completed = 0
@@ -521,15 +712,18 @@ def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool
             # Zrušíme dosud nezačaté úlohy; běžící práci executor nechá doběhnout.
             for future in pending:
                 future.cancel()
+            # Sdílený pool nesmí začít další kapitolu, dokud dobíhá tato.
+            wait(pending)
             raise
     if pdf_executor is not None:
         LOG.info("Predavam do tvorby PDF: %s", chapter.title)
-        return pdf_executor.submit(finish_pdf, paths, pdf, chapter.title, manifest, signature, legacy_pdf)
-    finish_pdf(paths, pdf, chapter.title, manifest, signature, legacy_pdf)
+        return pdf_executor.submit(finish_pdf, paths, pdf, chapter.title, manifest, signature, legacy_pdf, jpeg_quality)
+    finish_pdf(paths, pdf, chapter.title, manifest, signature, legacy_pdf, jpeg_quality)
     LOG.info("Hotovo: %s", pdf)
 
 
-def run_downloads(client, chapters, output, force, workers, pdf_workers, write_manifest=False):
+def run_downloads(client, chapters, output, force, workers, pdf_workers, write_manifest=False,
+                  pdf_tasks_per_child=10, jpeg_quality=None, rebuild=False):
     """Propojí stahování s omezenou frontou PDF procesů a sečte chyby obou fází."""
     # Kontrola před spuštěním brání přepsání PDF dvěma různými vydáními.
     names = {}
@@ -553,9 +747,9 @@ def run_downloads(client, chapters, output, force, workers, pdf_workers, write_m
                 failures += 1
                 LOG.error("Tvorba PDF %s selhala: %s", title, exc)
 
-    # Nový proces pro každé PDF vrátí OS i paměť drženou alokátory Pillow/ReportLab.
-    # Současně běží nejvýše pdf_workers procesů; fronta obsahuje jen cesty k souborům.
-    with ProcessPoolExecutor(max_workers=pdf_workers, max_tasks_per_child=1) as executor:
+    # Recyklace po dávce omezuje režii startu i dlouhodobé držení paměti.
+    with ProcessPoolExecutor(max_workers=pdf_workers, max_tasks_per_child=pdf_tasks_per_child) as executor, \
+            ThreadPoolExecutor(max_workers=workers, thread_name_prefix='image') as image_executor:
         try:
             for chapter in chapters:
                 collect()
@@ -565,7 +759,8 @@ def run_downloads(client, chapters, output, force, workers, pdf_workers, write_m
                     LOG.info("Cekam na uvolneni fronty PDF...")
                     collect(block=True)
                 try:
-                    future = download_chapter(client, chapter, output, force, workers, executor, write_manifest)
+                    future = download_chapter(client, chapter, output, force, workers, executor, write_manifest,
+                                              image_executor, jpeg_quality, rebuild)
                     if future is not None:
                         pending[future] = chapter.title
                 except Exception as exc:
@@ -595,18 +790,23 @@ def main(argv=None) -> int:
     parser.add_argument("--oldest-first", action="store_true", help="Radit od nejnizsiho cisla kapitoly (vychozi)")
     parser.add_argument("--newest-first", action="store_true", help="Radit od nejvyssiho cisla kapitoly")
     parser.add_argument("--force", action="store_true", help="Znovu stahnout i hotove kapitoly")
+    parser.add_argument("--rebuild", action="store_true", help="Znovu vytvorit PDF z cache bez nuceneho stahovani obrazku")
+    parser.add_argument("--jpeg-quality", type=int, help="Volitelna ztratova komprese ne-JPEG RGB/gray obrazku (1-95); puvodni JPEG se nemeni")
     parser.add_argument("--write-manifest", action="store_true", help="Ukladat a kontrolovat otisk .pages.sha256 vedle PDF (vychozi vypnuto)")
     parser.add_argument("--timeout", type=float, default=60, help="Limit jednoho pokusu o prenos v sekundach (vychozi 60)")
     parser.add_argument("--workers", type=int, default=4, help="Pocet soubezne stahovanych obrazku (vychozi 4, 1 = postupne)")
     parser.add_argument("--pdf-workers", type=int, default=1, help="Pocet procesu pro PDF bezici soubezne se stahovanim (vychozi 1)")
+    parser.add_argument("--pdf-tasks-per-child", type=int, default=10, help="Pocet PDF pred restartem procesu (vychozi 10; 1 pro nizsi spotrebu pameti)")
     parser.add_argument("--delay", type=float, default=0.5, help="Prodleva pred pozadavkem v kazdem vlakne v sekundach")
     args = parser.parse_args(argv)
     if bool(args.feed) == bool(args.chapter):
         parser.error("Zadejte RSS / stranku serie, nebo --chapter URL")
     if args.oldest_first and args.newest_first:
         parser.error("Vyberte pouze jeden smer razeni")
-    if args.timeout <= 0 or args.delay < 0 or args.workers < 1 or args.pdf_workers < 1 or (args.limit is not None and args.limit <= 0):
+    if not math.isfinite(args.timeout) or not math.isfinite(args.delay) or args.timeout <= 0 or args.delay < 0 or args.workers < 1 or args.pdf_workers < 1 or args.pdf_tasks_per_child < 1 or (args.limit is not None and args.limit <= 0):
         parser.error("timeout, limit, workers a pdf-workers musi byt kladne, delay nezaporne")
+    if args.jpeg_quality is not None and not 1 <= args.jpeg_quality <= 95:
+        parser.error("jpeg-quality musi byt v rozsahu 1 az 95")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
     client = None
     try:
@@ -614,7 +814,9 @@ def main(argv=None) -> int:
         if args.chapter:
             url = http_url(args.chapter)
             page = SeriesPage()
-            page.feed(client.get(url).decode('utf-8-sig'))
+            html = client.get(url).decode('utf-8-sig')
+            client.prefetched_html[url] = html
+            page.feed(html)
             parts = [part.strip() for part in page.title.split(' | ')]
             if len(parts) >= 3 and CHAPTER_LABEL.fullmatch(parts[0]):
                 title = f'{parts[1]} {parts[0]}'
@@ -641,7 +843,8 @@ def main(argv=None) -> int:
             return 0
         args.output.mkdir(parents=True, exist_ok=True)
         LOG.info("Stahovani pomoci %d vlaken.", args.workers)
-        failures = run_downloads(client, chapters, args.output, args.force, args.workers, args.pdf_workers, args.write_manifest)
+        failures = run_downloads(client, chapters, args.output, args.force, args.workers, args.pdf_workers,
+                                 args.write_manifest, args.pdf_tasks_per_child, args.jpeg_quality, args.rebuild)
         return 1 if failures else 0
     except KeyboardInterrupt:
         LOG.error("Preruseno. Dalsi spusteni navaze na stazene obrazky.")
@@ -651,6 +854,9 @@ def main(argv=None) -> int:
         if isinstance(exc, urllib.error.HTTPError) and exc.code == 403:
             LOG.error("Server odmitl HTTP pozadavek (403). Zmena klienta na curl/wget sama o sobe nezarucuje pristup.")
         return 1
+    finally:
+        if client is not None:
+            client.close()
 
 
 # Ochrana je nutná i pro Windows: PDF proces při importu nesmí spustit celý program.
