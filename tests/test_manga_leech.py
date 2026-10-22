@@ -16,6 +16,21 @@ from manga_leech import Chapter, Client, SeriesPage, chapter_sort_key, download_
 
 
 class Tests(unittest.TestCase):
+    def test_episode_series_rss_names_and_metadata(self):
+        from manga_leech import pdf_xmp
+        for label in ['Episode', 'Episode.', 'episode']:
+            with self.subTest(label=label):
+                page = SeriesPage()
+                page.feed(f'<a href="/chapters/ten">{label} 10</a><a href="/chapters/one">{label} 1</a><a href="/chapters/half">{label} 1.5</a>')
+                chapters = [Chapter('your name. ' + c.title, c.url) for c in page.chapters]
+                self.assertEqual([pdf_name(c) for c in sorted(chapters, key=chapter_sort_key)], ['your name - Ch 001', 'your name - Ch 001.5', 'your name - Ch 010'])
+                title = f'your name. {label} 1.5'
+                rss = f'<rss><channel><item><title>{title}</title><link>/chapters/id</link></item></channel></rss>'.encode()
+                self.assertEqual(pdf_name(parse_feed(rss, 'https://example.org/rss')[0]), 'your name - Ch 001.5')
+                xmp = ET.fromstring(pdf_xmp(title))
+                self.assertEqual(xmp.find('.//{http://calibre-ebook.com/xmp-namespace}series').text, 'your name.')
+                self.assertEqual(xmp.find('.//{http://calibre-ebook.com/xmp-namespace-series-index}series_index').text, '1.5')
+
     def test_inline_volume_series_without_show_all(self):
         class InlineClient(Client):
             def __init__(self):

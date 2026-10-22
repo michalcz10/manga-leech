@@ -1,4 +1,9 @@
-"""Download chapters from RSS or a WeebCentral series, one PDF per chapter."""
+"""Stahování mangy z RSS nebo stránky série WeebCentral do samostatných PDF.
+
+Průběh: vstupní URL -> seznam vydání -> obrázky v cache -> PDF s metadaty.
+Obrázky jedné kapitoly stahují vlákna; PDF skládají samostatné procesy,
+takže stahování další kapitoly může pokračovat během tvorby předchozího PDF.
+"""
 from __future__ import annotations
 
 import argparse
@@ -30,26 +35,34 @@ from reportlab.pdfbase.pdfdoc import PDFDictionary, PDFName, PDFStream
 from reportlab.pdfgen import canvas
 
 LOG = logging.getLogger("manga-leech")
-# PDF supports binary streams; ASCII85 would add about 25% to embedded JPEGs.
+# PDF umí binární streamy; ASCII85 by zbytečně zvětšilo vložené JPEG asi o 25 %.
 rl_config.useA85 = False
+# Při změně formátu zvýšíme verzi: stará PDF se přestaví z existující cache.
 PDF_FORMAT_VERSION = "original-jpeg-series-title-v5"
-CHAPTER_LABEL = re.compile(r'\b(?:Chapter|Page|Volume|Vol)\.?\s+(\d+(?:\.\d+)?)(?=\s|$)', re.I)
+# Jednotný filtr vydání pro seznam série, RSS, řazení, názvy souborů a metadata.
+# Episode se zpracuje jako kapitola (Ch); pouze Volume/Vol používá označení Vol.
+CHAPTER_LABEL = re.compile(r'\b(?:Chapter|Page|Volume|Vol|Episode)\.?\s+(\d+(?:\.\d+)?)(?=\s|$)', re.I)
+# Tyto HTML značky nemají obsah ani vlastní zavírací značku.
 VOID_TAGS = {"img", "br", "hr", "input", "meta", "link", "source", "wbr", "area", "base", "embed", "param", "track", "col"}
 
 
 @dataclass(frozen=True)
 class Chapter:
+    """Jedno vydání (kapitola, položka Page nebo svazek) a odkaz na jeho čtečku."""
     title: str
     url: str
 
 
 def chapter_sort_key(chapter: Chapter):
+    """Vrátí číselné pořadí; nerozpoznané názvy řadí za očíslovaná vydání."""
+    # Decimal zachová pořadí 2, 2.5, 10; poslední shoda patří označení vydání.
     matches = list(CHAPTER_LABEL.finditer(chapter.title))
     match = matches[-1] if matches else None
     return (0, Decimal(match.group(1))) if match else (1, Decimal(0))
 
 
 def series_metadata(title: str):
+    """Oddělí název série od posledního označení vydání, např. Overgeared Chapter 25."""
     matches = list(CHAPTER_LABEL.finditer(title))
     if matches:
         match = matches[-1]
@@ -60,6 +73,8 @@ def series_metadata(title: str):
 
 
 def pdf_xmp(title: str) -> bytes:
+    """Sestaví XMP: titul a série mají stejný název, číslo je index Calibre pro Kavitu."""
+    # ElementTree zajistí správné escapování názvů obsahujících například & nebo <.
     ns = {
         'x': 'adobe:ns:meta/',
         'rdf': 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
@@ -85,16 +100,18 @@ def pdf_xmp(title: str) -> bytes:
 
 
 def http_url(value: str) -> str:
+    """Povolí jen absolutní HTTP(S) adresy, nikoli lokální soubory či jiné protokoly."""
     if urlparse(value).scheme not in {"http", "https"} or not urlparse(value).hostname:
         raise ValueError(f"Neplatna HTTP(S) adresa: {value}")
     return value
 
 
 def parse_feed(data: bytes, base: str) -> list[Chapter]:
+    """Načte RSS/Atom, doplní relativní odkazy a odstraní duplicity podle URL."""
     root = ET.fromstring(data)
     chapters = []
     seen = set()
-    # RSS 2.0 and Atom, preserving the feed's order.
+    # Zde zachováváme pořadí feedu; číselné řazení provede až main před --limit.
     for item in root.iter():
         if item.tag.split("}")[-1] not in {"item", "entry"}:
             continue
@@ -117,7 +134,11 @@ def parse_feed(data: bytes, base: str) -> list[Chapter]:
 
 
 class SeriesPage(HTMLParser):
-    """Read the public full-list link, document title and chapter anchors."""
+    """Z HTML získá titul série, odkaz Show All a odkazy na jednotlivá vydání.
+
+    chapters obsahuje všechny nalezené odkazy na vydání, inline_chapters pouze
+    odkazy uvnitř #chapter-list. To brání přimíchání doporučených sérií.
+    """
 
     def __init__(self):
         super().__init__()
@@ -133,6 +154,7 @@ class SeriesPage(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
+        # Zásobník sleduje, zda aktuální značka leží uvnitř seznamu vydání.
         inside_list = any(self.stack) or attrs.get('id') == 'chapter-list'
         if tag not in VOID_TAGS:
             self.stack.append(inside_list)
@@ -170,6 +192,7 @@ class SeriesPage(HTMLParser):
 
 
 class ReaderImages(HTMLParser):
+    """Sbírá pouze obrázky čtečky #chapter-images, bez loga, reklam a obálek."""
     def __init__(self):
         super().__init__()
         self.stack = []
@@ -186,13 +209,14 @@ class ReaderImages(HTMLParser):
             self.stack.append(active)
 
     def handle_endtag(self, tag):
-        # HTMLParser calls handle_endtag for XHTML-style <img ... /> too.
-        # Void elements never opened a stack frame, so must not close the reader.
+        # HTMLParser zavolá handle_endtag také pro <img ... />.
+        # Obrázek nepřidal položku do zásobníku, proto nesmí uzavřít sekci čtečky.
         if tag not in VOID_TAGS and self.stack:
             self.stack.pop()
 
 
 def image_urls(html: str, base: str) -> list[str]:
+    """Vrátí unikátní absolutní URL obrázků v původním pořadí čtečky."""
     parser = ReaderImages()
     parser.feed(html)
     urls = list(dict.fromkeys(http_url(urljoin(base, src)) for src in parser.urls))
@@ -202,12 +226,14 @@ def image_urls(html: str, base: str) -> list[str]:
 
 
 def safe_name(chapter: Chapter) -> str:
+    """Stabilní název interní cache; hash URL rozliší vydání se stejným titulkem."""
     title = unicodedata.normalize("NFKC", chapter.title)
     title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", title).strip(" .")[:120] or "chapter"
     return f"{title}-{hashlib.sha256(chapter.url.encode()).hexdigest()[:10]}"
 
 
 def pdf_name(chapter: Chapter) -> str:
+    """Čitelný název PDF bez přípony: Série - Ch 025 nebo Série - Vol 001."""
     series, number = series_metadata(chapter.title)
     if not series:
         return safe_name(chapter)
@@ -221,6 +247,7 @@ def pdf_name(chapter: Chapter) -> str:
 
 
 class Client:
+    """HTTP klient se sdílenými cookies, opakováním požadavků a pauzami pro hosty."""
     def __init__(self, timeout: float, delay: float, user_agent: str = "MangaLeech/0.1"):
         self.timeout, self.delay = timeout, delay
         self.user_agent = user_agent
@@ -230,6 +257,7 @@ class Client:
         self.cooldowns = {}
 
     def wait_for_host(self, host):
+        """Počká na konec společné pauzy hostu; zámek nedrží během spánku."""
         while True:
             with self.cooldown_lock:
                 remaining = self.cooldowns.get(host, 0) - time.monotonic()
@@ -238,6 +266,7 @@ class Client:
             time.sleep(min(remaining, 1))
 
     def retry_delay(self, headers, fallback):
+        """Rozpozná Retry-After jako sekundy nebo HTTP datum, jinak použije fallback."""
         value = headers.get("Retry-After") if headers else None
         if value:
             try:
@@ -250,7 +279,7 @@ class Client:
         return fallback
 
     def thread_opener(self):
-        # Handler state is per thread; CookieJar synchronizes access internally.
+        # Každé vlákno má vlastní opener; přístup ke sdílené CookieJar se zamyká uvnitř knihovny.
         if not hasattr(self.local, "opener"):
             self.local.opener = urllib.request.build_opener(
                 urllib.request.HTTPCookieProcessor(self.cookies)
@@ -258,6 +287,7 @@ class Client:
         return self.local.opener
 
     def get(self, url: str, referer: str | None = None) -> bytes:
+        """Stáhne odpověď s nejvýše třemi pokusy; neúplné přenosy nepřijme."""
         headers = {"User-Agent": self.user_agent, "Accept": "*/*"}
         if referer:
             headers["Referer"] = referer
@@ -267,7 +297,8 @@ class Client:
             time.sleep(self.delay)
             try:
                 started = time.monotonic()
-                # Socket timeout alone does not bound a slowly trickling response.
+                # Socket timeout hlídá nečinnost, monotonic navíc celkovou dobu přenosu.
+                # Jedno blokující čtení může celkový limit překročit o svůj timeout.
                 with self.thread_opener().open(urllib.request.Request(url, headers=headers), timeout=min(10, self.timeout)) as response:
                     chunks = []
                     received = 0
@@ -290,6 +321,7 @@ class Client:
                 LOG.warning("HTTP %d: %s (pokus %d/3)", status, url, attempt + 1)
                 if status not in {429, 500, 502, 503, 504} or attempt == 2:
                     raise
+                # Pauza platí i pro další požadavky ostatních vláken na stejný host.
                 if status in {429, 503}:
                     if pause > 120:
                         LOG.error("Server pozaduje pauzu %.0f s; kapitola selze misto dlouheho cekani. Zkuste pozdeji.", pause)
@@ -306,8 +338,9 @@ class Client:
         raise RuntimeError("Stazeni selhalo")
 
     def chapter_html(self, url: str) -> str:
+        """Načte čtečku a případně její HTML fragment s kompletním seznamem obrázků."""
         html = self.get(url).decode("utf-8-sig")
-        # WeebCentral loads the reader as an HTML fragment using a normal GET.
+        # Stejný GET jako v čtečce webu; pro získání fragmentu není třeba JavaScript.
         if not re.search(r'id=["\']chapter-images["\'][^>]*>\s*<img', html):
             match = re.search(r'["\']([^"\']+/images\?is_prev=False)["\']', html)
             if match:
@@ -321,6 +354,7 @@ class Client:
         return self.get(url)
 
     def series_chapters(self, url: str) -> list[Chapter]:
+        """Použije úplný seznam Show All, nebo vložený seznam u krátké série."""
         page = SeriesPage()
         page.feed(self.get(url).decode("utf-8-sig"))
         if not page.full_list and not page.inline_chapters:
@@ -333,7 +367,7 @@ class Client:
             listing.feed(self.get(endpoint, url).decode("utf-8-sig"))
             entries = listing.chapters
         else:
-            # Short series have their full list inline and no Show All button.
+            # Krátké série mají všechna vydání přímo na stránce a tlačítko Show All chybí.
             entries = page.inline_chapters
         name = page.title.split(" | ")[0].strip()
         chapters = {}
@@ -348,6 +382,7 @@ class Client:
 
 
 def valid_image(path: Path) -> bool:
+    """Ověří existenci a strukturu obrázku před opětovným použitím cache."""
     try:
         with Image.open(path) as image:
             image.verify()
@@ -357,6 +392,7 @@ def valid_image(path: Path) -> bool:
 
 
 def make_pdf(images: list[Path], output: Path, title: str):
+    """Vytvoří jednu PDF stránku na obrázek a hotový soubor atomicky přejmenuje."""
     temporary = output.with_suffix(".pdf.part")
     try:
         pdf = canvas.Canvas(str(temporary), pageCompression=1)
@@ -365,16 +401,18 @@ def make_pdf(images: list[Path], output: Path, title: str):
             PDFDictionary({'Type': PDFName('Metadata'), 'Subtype': PDFName('XML')}),
             content=pdf_xmp(title), filters=[],
         )
+        # ReportLab nemá veřejný setter pro XMP; stream připojujeme do katalogu PDF.
         pdf._doc.Catalog.Metadata = metadata
         for path in images:
             with Image.open(path) as source:
-                # One original image per PDF page; keep aspect ratio and avoid PDF size limits.
+                # Měníme fyzickou velikost stránky, nikoli počet pixelů obrázku.
+                # Zachováme poměr stran a omezíme rozměry PDF stránky na 14 000 bodů.
                 width, height = source.size
                 scale = min(0.75, 14000 / max(width, height))
                 w, h = width * scale, height * scale
                 pdf.setPageSize((w, h))
-                # Read from the file so ImageReader retains the original JPEG stream.
-                # This detects the actual format even for our cached .img filenames.
+                # Čtení přímo ze souboru zachová JPEG bez překódování (malé a rychlé PDF).
+                # Formát se rozpozná podle obsahu, i když má cache příponu .img.
                 pdf.drawImage(ImageReader(str(path)), 0, 0, width=w, height=h, mask="auto")
                 pdf.showPage()
         pdf.save()
@@ -384,12 +422,12 @@ def make_pdf(images: list[Path], output: Path, title: str):
 
 
 def finish_pdf(paths, pdf, title, manifest, signature, legacy_pdf=None):
-    """Top-level function so Windows can run it in a spawned process."""
+    """Dokončí PDF i jeho otisk; funkce na úrovni modulu funguje i v procesu na Windows."""
     make_pdf(paths, pdf, title)
     temporary = manifest.with_suffix(".sha256.part")
     temporary.write_text(signature)
     temporary.replace(manifest)
-    # Complete the filename migration only after the replacement PDF is ready.
+    # Staré PDF s hashem odstraníme až po úspěšném vytvoření nové verze a otisku.
     if legacy_pdf is not None and legacy_pdf != pdf:
         legacy_pdf.unlink(missing_ok=True)
         legacy_pdf.with_suffix('.pages.sha256').unlink(missing_ok=True)
@@ -397,12 +435,18 @@ def finish_pdf(paths, pdf, title, manifest, signature, legacy_pdf=None):
 
 
 def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool, workers: int = 4, pdf_executor=None):
+    """Stáhne obrázky vydání a vytvoří PDF, nebo vrátí Future z PDF procesu.
+
+    Hotová aktuální PDF přeskakuje (vrací None). Interní cache zůstává ve starém
+    formátu s hashem, aby změny názvů PDF nevyvolaly nové stahování obrázků.
+    """
     if workers < 1:
         raise ValueError("Pocet vlaken musi byt alespon 1")
     name = safe_name(chapter)
     pdf = output / f"{pdf_name(chapter)}.pdf"
     legacy_pdf = output / f"{name}.pdf"
     urls = image_urls(client.chapter_html(chapter.url), chapter.url)
+    # Otisk váže PDF na verzi generátoru, metadata a aktuální pořadí obrázků.
     signature = hashlib.sha256((PDF_FORMAT_VERSION + "\n" + chapter.title + "\n" + "\n".join(urls)).encode()).hexdigest()
     manifest = pdf.with_suffix('.pages.sha256')
     if pdf.exists() and manifest.exists() and manifest.read_text() == signature and not force:
@@ -415,7 +459,7 @@ def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool
         path = cache / f"{index:05d}-{key}.img"
         if force or not valid_image(path):
             data = client.get(url, chapter.url)
-            # Verify before committing the cache entry.
+            # Do cache uložíme pouze ověřený obrázek, nikoli HTML chyby vrácené serverem.
             with Image.open(io.BytesIO(data)) as image:
                 image.verify()
             temporary = path.with_suffix(".part")
@@ -423,6 +467,7 @@ def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool
             temporary.replace(path)
         return path
 
+    # Obrázky mohou dorazit různě rychle; cesty ukládáme podle původního indexu.
     paths = [None] * len(urls)
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="image") as executor:
         pending = {executor.submit(download_image, index, url): index for index, url in enumerate(urls, 1)}
@@ -443,6 +488,7 @@ def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool
                     completed += 1
                     LOG.info("%s: hotovo %d/%d (obrazek %d)", chapter.title, completed, len(urls), index)
         except BaseException:
+            # Zrušíme dosud nezačaté úlohy; běžící práci executor nechá doběhnout.
             for future in pending:
                 future.cancel()
             raise
@@ -454,6 +500,8 @@ def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool
 
 
 def run_downloads(client, chapters, output, force, workers, pdf_workers):
+    """Propojí stahování s omezenou frontou PDF procesů a sečte chyby obou fází."""
+    # Kontrola před spuštěním brání přepsání PDF dvěma různými vydáními.
     names = {}
     for chapter in chapters:
         name = pdf_name(chapter).casefold()
@@ -464,6 +512,7 @@ def run_downloads(client, chapters, output, force, workers, pdf_workers):
     pending = {}
 
     def collect(block=False):
+        """Převezme výsledky PDF; volitelně počká na první dokončený proces."""
         nonlocal failures
         done = wait(pending, return_when=FIRST_COMPLETED).done if block else {f for f in pending if f.done()}
         for future in done:
@@ -478,7 +527,8 @@ def run_downloads(client, chapters, output, force, workers, pdf_workers):
         try:
             for chapter in chapters:
                 collect()
-                # Bound queued chapters; pass paths rather than image bytes to workers.
+                # Fronta smí obsahovat nejvýše dvojnásobek počtu PDF procesů.
+                # Předáváme pouze cesty; velké obrazové bajty se mezi procesy nekopírují.
                 while len(pending) >= pdf_workers * 2:
                     LOG.info("Cekam na uvolneni fronty PDF...")
                     collect(block=True)
@@ -494,6 +544,7 @@ def run_downloads(client, chapters, output, force, workers, pdf_workers):
             while pending:
                 collect(block=True)
         except BaseException:
+            # Zrušíme dosud nezačaté úlohy; běžící práci executor nechá doběhnout.
             for future in pending:
                 future.cancel()
             raise
@@ -501,6 +552,7 @@ def run_downloads(client, chapters, output, force, workers, pdf_workers):
 
 
 def main(argv=None) -> int:
+    """Zpracuje parametry, vybere zdroj a vrátí kód 0 (úspěch), 1 nebo 130 (Ctrl+C)."""
     parser = argparse.ArgumentParser(description="RSS nebo stranka serie -> jedno PDF pro kazdou kapitolu (WeebCentral).")
     parser.add_argument("feed", nargs="?", help="HTTP(S) adresa RSS/Atom feedu nebo stranky serie WeebCentral")
     parser.add_argument("--chapter", help="Stahnout jednu kapitolu primo podle URL misto RSS")
@@ -548,6 +600,7 @@ def main(argv=None) -> int:
                 chapters = parse_feed(client.feed_bytes(source), source)
                 LOG.info("Feed obsahuje %d kapitol.", len(chapters))
             chapters.sort(key=chapter_sort_key, reverse=args.newest_first)
+        # Limit aplikujeme až po seřazení, aby --limit 1 vybral první vydání.
         chapters = chapters[:args.limit]
         if args.list:
             for chapter in chapters:
@@ -567,5 +620,6 @@ def main(argv=None) -> int:
         return 1
 
 
+# Ochrana je nutná i pro Windows: PDF proces při importu nesmí spustit celý program.
 if __name__ == "__main__":
     sys.exit(main())
