@@ -78,19 +78,20 @@ RSS je seznam posledních vydání, nikoli archiv celé série. Při ověření 
 - `--newest-first`: řazení od nejvyšší kapitoly.
 - `--chapter URL`: stáhne přímo jednu kapitolu místo RSS.
 - `--force`: stáhne znovu obrázky i existující PDF.
+- `--write-manifest`: zapne vytváření a kontrolu souborů `.pages.sha256` vedle PDF; výchozí stav je vypnuto.
 - `--workers 4`: počet současně stahovaných obrázků, výchozí 4. `--workers 1` stahuje postupně. Počet není vázaný na CPU, protože stahování čeká hlavně na síť.
 - `--pdf-workers 1`: počet samostatných procesů pro tvorbu PDF, výchozí 1. PDF se generuje na pozadí souběžně se stahováním další kapitoly. Hodnota 2 umožní tvořit dvě PDF současně a vyžaduje více paměti.
 - `--delay 1`: prodleva před každým požadavkem v jednotlivém vlákně, výchozí 0,5 s. Nejde o společný limit všech vláken; více vláken zvýší celkový počet požadavků za sekundu.
 - `--timeout 60`: časový limit jednoho pokusu o přenos v sekundách. Čtení kontroluje i celkovou dobu, nejen nečinnost socketu. Jedno blokující čtení může limit překročit nejvýše přibližně o 10 s; systémové DNS nemusí tento limit respektovat.
 
-Kapitoly se stahují postupně; uvnitř každé kapitoly se obrázky stahují paralelně. Po dokončení obrázků se kapitola předá samostatnému PDF procesu a ihned začne stahování další kapitoly. PDF zachovává původní pořadí čtečky. Fronta má nejvýše dvojnásobek `--pdf-workers` nedokončených PDF; při zaplnění stahování počká. Procesům se předávají pouze cesty k obrázkům. Před úspěšným ukončením aplikace počká na všechna PDF; chyba tvorby PDF vede k návratovému kódu 1. Při přerušení se zruší čekající úlohy a běžící práce doběhne, což může chvíli trvat. Ověřené obrázky zůstávají pro další spuštění.
+Kapitoly se stahují postupně; uvnitř každé kapitoly se obrázky stahují paralelně. Po dokončení obrázků se kapitola předá samostatnému PDF procesu a ihned začne stahování další kapitoly. Po každém PDF proces skončí a další úlohu převezme nový proces, aby se paměť knihoven vrátila operačnímu systému. PDF zachovává původní pořadí čtečky. Fronta má nejvýše dvojnásobek `--pdf-workers` nedokončených PDF; při zaplnění stahování počká. Procesům se předávají pouze cesty k obrázkům. Před úspěšným ukončením aplikace počká na všechna PDF; chyba tvorby PDF vede k návratovému kódu 1. Při přerušení se zruší čekající úlohy a běžící práce doběhne, což může chvíli trvat. Ověřené obrázky zůstávají pro další spuštění.
 
 ```powershell
 # Vlastní počet vláken
 .\.venv\Scripts\python.exe manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer" --workers 8 --pdf-workers 2
 ```
 
-PDF se ukládají do `downloads/`. Ověřené obrázky zůstávají v `downloads/.images/`, aby další spuštění mohlo navázat. Hotová PDF se přeskakují pouze tehdy, pokud souhlasí uložený otisk seznamu obrázků (`.pages.sha256`). Starší PDF bez tohoto záznamu se automaticky vytvoří znovu, včetně dříve neúplných jednostránkových PDF. Neúplná kapitola se jako PDF nezveřejní; chyba jedné kapitoly nezastaví ostatní. Návratový kód 0 znamená úspěch, 1 chybu, 130 přerušení. Poškozené nebo zastaralé hotové PDF lze obnovit pomocí `--force`.
+PDF se ukládají do `downloads/`. Ověřené obrázky zůstávají v `downloads/.images/`, aby další spuštění mohlo navázat. Standardně se hotové PDF přeskakuje podle existence souboru a žádný `.pages.sha256` nevzniká. S volbou `--write-manifest` se kontroluje také otisk verze generátoru, názvu vydání a seznamu obrázků; chybějící nebo nesouhlasící otisk vyvolá nové vytvoření PDF z cache. Starší SHA soubory po vypnutí volby zůstávají na disku a lze je odstranit; samotné stahování je nepotřebuje. Neúplná kapitola se jako PDF nezveřejní; chyba jedné kapitoly nezastaví ostatní. Návratový kód 0 znamená úspěch, 1 chybu, 130 přerušení. Poškozené nebo zastaralé hotové PDF lze obnovit pomocí `--force`.
 
 ## Testy
 
@@ -99,7 +100,7 @@ PDF se ukládají do `downloads/`. Ověřené obrázky zůstávají v `downloads
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Testy ověřují RSS/Atom, načtení úplného seznamu série místo náhledu, odstranění duplicit, chybu při chybějícím seznamu, načtení HTML fragmentu čtečky bez prohlížeče, pořadí a výběr obrázků, počet a rozměry PDF stran, navázání stahování a odmítnutí poškozených obrázků. Dále ověřují skutečný souběh stahování, zachování pořadí v PDF při opačném pořadí dokončení a samostatné HTTP klienty vláken. Testy také ověřují překryv tvorby PDF se stahováním další kapitoly, dokončení PDF před návratem, hlášení chyb tvorby PDF a skutečné spuštění PDF procesu. Testy navíc porovnávají vložené JPEG streamy s původními soubory (RGB, odstíny šedi i CMYK). Testy také simulují pomalý nepřetržitý přenos, HTTP 429 s opakováním a neúplnou odpověď. Testy také ověřují XMP metadata pro Kavitu, společnou sérii, desetinné indexy a XML escapování názvů. Testy ověřují také názvy souborů a migraci původních PDF z cache. Testy pokrývají také označení Page/Page. v seznamu série a RSS, názvy souborů i metadata PDF. Testy také ověřují svazky Volume/Vol. a krátké seznamy přímo na stránce. Testy pokrývají také Episode/Episode. v seznamu, RSS, řazení a metadatech. Všech 25 testů prošlo na dostupném Pythonu 3.12; Python 3.15 zde nebyl dostupný. Živě bylo dříve ověřeno načtení všech 225 položek série a také stažení všech 205 obrázků referenční kapitoly 1 do PDF s 205 stranami. Dostupnost serveru může kolísat; předchozí požadavky někdy vracely 403.
+Testy ověřují RSS/Atom, načtení úplného seznamu série místo náhledu, odstranění duplicit, chybu při chybějícím seznamu, načtení HTML fragmentu čtečky bez prohlížeče, pořadí a výběr obrázků, počet a rozměry PDF stran, navázání stahování a odmítnutí poškozených obrázků. Dále ověřují skutečný souběh stahování, zachování pořadí v PDF při opačném pořadí dokončení a samostatné HTTP klienty vláken. Testy také ověřují překryv tvorby PDF se stahováním další kapitoly, dokončení PDF před návratem, hlášení chyb tvorby PDF a skutečné spuštění PDF procesu. Testy navíc porovnávají vložené JPEG streamy s původními soubory (RGB, odstíny šedi i CMYK). Testy také simulují pomalý nepřetržitý přenos, HTTP 429 s opakováním a neúplnou odpověď. Testy také ověřují XMP metadata pro Kavitu, společnou sérii, desetinné indexy a XML escapování názvů. Testy ověřují také názvy souborů a migraci původních PDF z cache. Testy pokrývají také označení Page/Page. v seznamu série a RSS, názvy souborů i metadata PDF. Testy také ověřují svazky Volume/Vol. a krátké seznamy přímo na stránce. Testy pokrývají také Episode/Episode. v seznamu, RSS, řazení a metadatech. Testy dále ověřují vložení JPEG bez dekódování pixelů, recyklaci PDF procesů, PNG průhlednost a volitelné manifesty. Všech 28 testů prošlo na dostupném Pythonu 3.12; Python 3.15 zde nebyl dostupný. Živě bylo dříve ověřeno načtení všech 225 položek série a také stažení všech 205 obrázků referenční kapitoly 1 do PDF s 205 stranami. Dostupnost serveru může kolísat; předchozí požadavky někdy vracely 403.
 
 ## Referenční kapitola 1
 
@@ -117,7 +118,7 @@ JPEG obrázky se vkládají v původní komprimované podobě bez překódován�
 
 Ověřeno na kapitole 1 s 205 JPEG obrázky: zdroj 13,43 MB, původní PDF 139,55 MB, nové PDF 13,57 MB. Nové PDF vzniklo přibližně za 1,6 sekundy na testovacím stroji. Všech 205 vložených JPEG streamů odpovídá původním souborům bajt po bajtu.
 
-Verze způsobu vytváření PDF je součástí otisku dokončené kapitoly. Starší PDF se při běžném spuštění automaticky přestaví z ověřené cache, bez nutnosti `--force` a opětovného stahování existujících obrázků. Seznam kapitol a obrázků se nadále načítá ze serveru.
+S volbou `--write-manifest` je verze způsobu vytváření PDF součástí otisku dokončené kapitoly; nesouhlasící PDF se přestaví z ověřené cache. Bez této volby se existující PDF neaktualizují automaticky. Pro přestavění bez nového stahování odeberte pouze příslušné PDF, ponechte jeho obrázky v `.images/` a spusťte příkaz znovu.
 
 ## Čekání na poslední obrázky
 
@@ -141,7 +142,7 @@ Kavita používá `calibre:series` pro seskupení; pokud chybí, může použít
 
 Dokumentace: https://wiki.kavitareader.com/guides/metadata/pdfs/ a https://wiki.kavitareader.com/guides/scanner/pdf/
 
-Starší PDF ve výstupní složce se při dalším spuštění běžného příkazu automaticky přestaví z ověřených obrázků v cache. Nepoužívejte `--force`, pokud nechcete znovu stahovat obrázky. Pro PDF již přesunutá na server je nutné aktualizované soubory nahradit nově vytvořenými. Poté spusťte nové skenování příslušné série v Kavitě. Metadata byla ověřena čtením výsledných PDF, včetně zachování původních JPEG streamů; běh na konkrétní instalaci Kavity zde nebyl ověřen.
+Starší PDF ve výstupní složce se při spuštění s `--write-manifest` přestaví z ověřených obrázků v cache, pokud jim chybí aktuální otisk. Bez manifestu se existující PDF přeskakují. Nepoužívejte `--force`, pokud nechcete znovu stahovat obrázky. Pro PDF již přesunutá na server je nutné aktualizované soubory nahradit nově vytvořenými. Poté spusťte nové skenování příslušné série v Kavitě. Metadata byla ověřena čtením výsledných PDF, včetně zachování původních JPEG streamů; běh na konkrétní instalaci Kavity zde nebyl ověřen.
 
 Při migraci se staré PDF s hashem ve výstupní složce odstraní až po úspěšném vytvoření nové verze se správným názvem a metadaty. Obrázky v cache zůstávají. Soubory přesunuté mimo výstupní složku se automaticky nemění.
 
@@ -164,3 +165,20 @@ U série „The Guy She Was Interested In Wasn't a Guy at All“ bylo živě ov�
 ## Označení Episode
 
 `Episode 1` i `Episode. 1` se zpracují jako kapitola, včetně desetinných čísel, RSS, přímého `--chapter`, metadat a řazení. Výstup používá `Ch`, například `your name - Ch 001.pdf`; název série v metadatech zůstává `your name.` dle webu. Živě ověřeno na Kimi No Na Wa: seznam obsahuje 9 položek a řadí se od Episode 1.
+
+## Spotřeba paměti
+
+Při vkládání JPEG se obchází `drawImage(ImageReader(...))`: ReportLab by jinak rozbalil obrazová data do pixelů kvůli výpočtu interního otisku. JPEG se nyní registruje jako PDF XObject přímo z komprimovaného streamu, bez dekódování. Pro PNG a další formáty zůstává dekódování po jednom obrázku, včetně zachování průhlednosti. ReportLab stále drží komprimované streamy jednoho rozpracovaného PDF v paměti, takže velký svazek může vyžadovat více RAM než běžná kapitola.
+
+Každý PDF proces zpracuje nejvýše jednu kapitolu (`max_tasks_per_child=1`) a skončí. Tím se vrátí i paměť držená alokátory nebo interními strukturami knihoven. Nové procesy mají malou režii spuštění. Pro nižší celkovou spotřebu ponechte `--pdf-workers 1`; také více download vláken znamená více současně načtených odpovědí. Stahování stále načítá jednotlivý soubor do paměti před ověřením a uložením.
+
+Kontrolní měření na Windows, vždy nový samostatný proces a stejných 205 JPEG obrázků referenční kapitoly: špičkový working set před změnou 208,37 MiB, po změně 73,04 MiB; čas tvorby PDF 1,475 s oproti 0,173 s. Jde o konkrétní měření jednoho procesu, nikoli garantovanou spotřebu všech sérií ani celého Linux kontejneru. Ověřeno zachování 205 stran, jejich rozměrů, JPEG bajtů a XMP metadat.
+
+Graf paměti kontejneru zahrnuje další procesy a podle způsobu měření také cache souborů. Samotný vysoký údaj tedy nedokazuje únik paměti downloaderu. Na Linuxu lze největší procesy a stav cache ověřit například:
+
+```bash
+ps -eo pid,ppid,comm,rss --sort=-rss | head -15
+free -h
+```
+
+RSS z `ps` je v KiB; cache a údaj `available` z `free` pomohou odlišit využití paměti procesy od systémové cache.

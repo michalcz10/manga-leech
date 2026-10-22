@@ -31,7 +31,7 @@ from urllib.parse import urljoin, urlparse
 from PIL import Image
 from reportlab import rl_config
 from reportlab.lib.utils import ImageReader
-from reportlab.pdfbase.pdfdoc import PDFDictionary, PDFName, PDFStream
+from reportlab.pdfbase.pdfdoc import PDFDictionary, PDFName, PDFStream, PDFImageXObject
 from reportlab.pdfgen import canvas
 
 LOG = logging.getLogger("manga-leech")
@@ -391,6 +391,24 @@ def valid_image(path: Path) -> bool:
         return False
 
 
+def draw_jpeg(pdf, path: Path, width, height):
+    """Vloží JPEG přímo jako XObject, bez rozbalení pixelů pro otisk ImageReader."""
+    # drawImage(ImageReader(...)) volá getRGBData i při zachování JPEG komprese.
+    # Identifikujeme proto objekt cestou a přečteme pouze JPEG hlavičku a stream.
+    name = 'jpeg_' + hashlib.sha256(str(path).encode()).hexdigest()
+    if pdf._doc.getXObjectName(name) not in pdf._doc.idToObject:
+        image = PDFImageXObject(name)
+        with path.open('rb') as stream:
+            if not image.loadImageFromJPEG(stream):
+                raise ValueError(f'Nelze precist JPEG: {path}')
+        pdf._doc.addForm(name, image)
+    pdf._currentPageHasImages = 1
+    pdf.saveState()
+    pdf.scale(width, height)
+    pdf.doForm(name)
+    pdf.restoreState()
+
+
 def make_pdf(images: list[Path], output: Path, title: str):
     """Vytvoří jednu PDF stránku na obrázek a hotový soubor atomicky přejmenuje."""
     temporary = output.with_suffix(".pdf.part")
@@ -411,9 +429,16 @@ def make_pdf(images: list[Path], output: Path, title: str):
                 scale = min(0.75, 14000 / max(width, height))
                 w, h = width * scale, height * scale
                 pdf.setPageSize((w, h))
-                # Čtení přímo ze souboru zachová JPEG bez překódování (malé a rychlé PDF).
-                # Formát se rozpozná podle obsahu, i když má cache příponu .img.
-                pdf.drawImage(ImageReader(str(path)), 0, 0, width=w, height=h, mask="auto")
+                # JPEG nevyžaduje dekódování pixelů. Ostatní formáty (např. PNG
+                # s průhledností) zpracuje ImageReader, ale pouze po jednom obrázku.
+                if source.format == 'JPEG':
+                    draw_jpeg(pdf, path, w, h)
+                else:
+                    reader = ImageReader(source)
+                    try:
+                        pdf.drawImage(reader, 0, 0, width=w, height=h, mask="auto")
+                    finally:
+                        del reader
                 pdf.showPage()
         pdf.save()
         temporary.replace(output)
@@ -422,22 +447,23 @@ def make_pdf(images: list[Path], output: Path, title: str):
 
 
 def finish_pdf(paths, pdf, title, manifest, signature, legacy_pdf=None):
-    """Dokončí PDF i jeho otisk; funkce na úrovni modulu funguje i v procesu na Windows."""
+    """Dokončí PDF a volitelný otisk; funkce na úrovni modulu funguje i v procesu na Windows."""
     make_pdf(paths, pdf, title)
-    temporary = manifest.with_suffix(".sha256.part")
-    temporary.write_text(signature)
-    temporary.replace(manifest)
-    # Staré PDF s hashem odstraníme až po úspěšném vytvoření nové verze a otisku.
+    if manifest is not None:
+        temporary = manifest.with_suffix(".sha256.part")
+        temporary.write_text(signature)
+        temporary.replace(manifest)
+    # Staré PDF s hashem odstraníme až po dokončení nové verze a případného otisku.
     if legacy_pdf is not None and legacy_pdf != pdf:
         legacy_pdf.unlink(missing_ok=True)
         legacy_pdf.with_suffix('.pages.sha256').unlink(missing_ok=True)
     return pdf
 
 
-def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool, workers: int = 4, pdf_executor=None):
+def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool, workers: int = 4, pdf_executor=None, write_manifest: bool = False):
     """Stáhne obrázky vydání a vytvoří PDF, nebo vrátí Future z PDF procesu.
 
-    Hotová aktuální PDF přeskakuje (vrací None). Interní cache zůstává ve starém
+    Hotová PDF přeskakuje (vrací None); kontrola aktuálnosti otiskem je volitelná. Interní cache zůstává ve starém
     formátu s hashem, aby změny názvů PDF nevyvolaly nové stahování obrázků.
     """
     if workers < 1:
@@ -445,11 +471,15 @@ def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool
     name = safe_name(chapter)
     pdf = output / f"{pdf_name(chapter)}.pdf"
     legacy_pdf = output / f"{name}.pdf"
+    # Bez otisku má existence PDF význam „hotovo“; aktualizaci vyžádá --force.
+    if pdf.exists() and not force and not write_manifest:
+        LOG.info("Preskakuji existujici PDF: %s", pdf.name)
+        return
     urls = image_urls(client.chapter_html(chapter.url), chapter.url)
     # Otisk váže PDF na verzi generátoru, metadata a aktuální pořadí obrázků.
-    signature = hashlib.sha256((PDF_FORMAT_VERSION + "\n" + chapter.title + "\n" + "\n".join(urls)).encode()).hexdigest()
-    manifest = pdf.with_suffix('.pages.sha256')
-    if pdf.exists() and manifest.exists() and manifest.read_text() == signature and not force:
+    signature = hashlib.sha256((PDF_FORMAT_VERSION + "\n" + chapter.title + "\n" + "\n".join(urls)).encode()).hexdigest() if write_manifest else None
+    manifest = pdf.with_suffix('.pages.sha256') if write_manifest else None
+    if pdf.exists() and manifest is not None and manifest.exists() and manifest.read_text() == signature and not force:
         LOG.info("Preskakuji existujici PDF: %s", pdf.name)
         return
     cache = output / ".images" / name
@@ -499,7 +529,7 @@ def download_chapter(client: Client, chapter: Chapter, output: Path, force: bool
     LOG.info("Hotovo: %s", pdf)
 
 
-def run_downloads(client, chapters, output, force, workers, pdf_workers):
+def run_downloads(client, chapters, output, force, workers, pdf_workers, write_manifest=False):
     """Propojí stahování s omezenou frontou PDF procesů a sečte chyby obou fází."""
     # Kontrola před spuštěním brání přepsání PDF dvěma různými vydáními.
     names = {}
@@ -523,7 +553,9 @@ def run_downloads(client, chapters, output, force, workers, pdf_workers):
                 failures += 1
                 LOG.error("Tvorba PDF %s selhala: %s", title, exc)
 
-    with ProcessPoolExecutor(max_workers=pdf_workers) as executor:
+    # Nový proces pro každé PDF vrátí OS i paměť drženou alokátory Pillow/ReportLab.
+    # Současně běží nejvýše pdf_workers procesů; fronta obsahuje jen cesty k souborům.
+    with ProcessPoolExecutor(max_workers=pdf_workers, max_tasks_per_child=1) as executor:
         try:
             for chapter in chapters:
                 collect()
@@ -533,7 +565,7 @@ def run_downloads(client, chapters, output, force, workers, pdf_workers):
                     LOG.info("Cekam na uvolneni fronty PDF...")
                     collect(block=True)
                 try:
-                    future = download_chapter(client, chapter, output, force, workers, executor)
+                    future = download_chapter(client, chapter, output, force, workers, executor, write_manifest)
                     if future is not None:
                         pending[future] = chapter.title
                 except Exception as exc:
@@ -563,6 +595,7 @@ def main(argv=None) -> int:
     parser.add_argument("--oldest-first", action="store_true", help="Radit od nejnizsiho cisla kapitoly (vychozi)")
     parser.add_argument("--newest-first", action="store_true", help="Radit od nejvyssiho cisla kapitoly")
     parser.add_argument("--force", action="store_true", help="Znovu stahnout i hotove kapitoly")
+    parser.add_argument("--write-manifest", action="store_true", help="Ukladat a kontrolovat otisk .pages.sha256 vedle PDF (vychozi vypnuto)")
     parser.add_argument("--timeout", type=float, default=60, help="Limit jednoho pokusu o prenos v sekundach (vychozi 60)")
     parser.add_argument("--workers", type=int, default=4, help="Pocet soubezne stahovanych obrazku (vychozi 4, 1 = postupne)")
     parser.add_argument("--pdf-workers", type=int, default=1, help="Pocet procesu pro PDF bezici soubezne se stahovanim (vychozi 1)")
@@ -608,7 +641,7 @@ def main(argv=None) -> int:
             return 0
         args.output.mkdir(parents=True, exist_ok=True)
         LOG.info("Stahovani pomoci %d vlaken.", args.workers)
-        failures = run_downloads(client, chapters, args.output, args.force, args.workers, args.pdf_workers)
+        failures = run_downloads(client, chapters, args.output, args.force, args.workers, args.pdf_workers, args.write_manifest)
         return 1 if failures else 0
     except KeyboardInterrupt:
         LOG.error("Preruseno. Dalsi spusteni navaze na stazene obrazky.")

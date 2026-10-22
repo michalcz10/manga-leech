@@ -1,6 +1,7 @@
 import tempfile
 import hashlib
 import io
+import os
 import threading
 import time
 import unittest
@@ -15,7 +16,66 @@ from pypdf import PdfReader
 from manga_leech import Chapter, Client, SeriesPage, chapter_sort_key, download_chapter, finish_pdf, image_urls, make_pdf, parse_feed, run_downloads, pdf_name, safe_name
 
 
+def record_pdf_worker(*args):
+    """Testovací úloha zapisuje PID, aby šlo ověřit recyklaci skutečné fronty PDF."""
+    output = finish_pdf(*args)
+    output.with_suffix('.pid').write_text(str(os.getpid()))
+    return output
+
+
 class Tests(unittest.TestCase):
+    def test_pdf_worker_recycled_after_each_task(self):
+        # Dva úkoly s jediným workerem musí proběhnout v různých procesech.
+        data = io.BytesIO()
+        Image.new('RGB', (20, 40), 'red').save(data, format='PNG')
+        class FakeClient:
+            def chapter_html(self, url):
+                return '<section id="chapter-images"><img src="/page.png" /></section>'
+            def get(self, url, referer=None):
+                return data.getvalue()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            chapters = [Chapter(f'Test Chapter {i}', f'https://example.org/{i}') for i in [1, 2]]
+            with patch('manga_leech.finish_pdf', record_pdf_worker):
+                self.assertEqual(run_downloads(FakeClient(), chapters, root, False, 2, 1), 0)
+            pids = [path.read_text() for path in root.glob('*.pid')]
+            self.assertEqual(len(pids), 2)
+            self.assertEqual(len(set(pids)), 2)
+
+    def test_png_transparency_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / 'transparent.png'
+            Image.new('RGBA', (20, 40), (255, 0, 0, 128)).save(image)
+            output = root / 'transparent.pdf'
+            make_pdf([image], output, 'Test Chapter 1')
+            page = PdfReader(output).pages[0]
+            embedded = next(iter(page['/Resources']['/XObject'].values())).get_object()
+            self.assertIn('/SMask', embedded)
+            self.assertEqual(embedded['/SMask'].get_data(), bytes([128]) * 20 * 40)
+
+    def test_manifest_disabled_by_default_and_opt_in_reuses_images(self):
+        data = io.BytesIO()
+        Image.new('RGB', (20, 40), 'red').save(data, format='PNG')
+        class FakeClient:
+            calls = 0
+            def chapter_html(self, url):
+                return '<section id="chapter-images"><img src="/page.png" /></section>'
+            def get(self, url, referer=None):
+                self.calls += 1
+                return data.getvalue()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient()
+            chapter = Chapter('Test Chapter 1', 'https://example.org/c')
+            download_chapter(client, chapter, root, False)
+            self.assertEqual(list(root.glob('*.pages.sha256')), [])
+            with patch.object(client, 'chapter_html', side_effect=AssertionError('Existing PDF should be skipped')):
+                download_chapter(client, chapter, root, False)
+            download_chapter(client, chapter, root, False, write_manifest=True)
+            self.assertEqual(len(list(root.glob('*.pages.sha256'))), 1)
+            self.assertEqual(client.calls, 1)
+
     def test_episode_series_rss_names_and_metadata(self):
         from manga_leech import pdf_xmp
         for label in ['Episode', 'Episode.', 'episode']:
@@ -171,7 +231,9 @@ class Tests(unittest.TestCase):
                 Image.new(mode, (40, 80), color).save(path, format='JPEG')
                 paths.append(path)
             pdf = root / 'original.pdf'
-            make_pdf(paths, pdf, 'JPEG')
+            # A JPEG must never be expanded into raw pixels just to compute a hash.
+            with patch('manga_leech.ImageReader.getRGBData', side_effect=AssertionError('JPEG pixel decode')):
+                make_pdf(paths, pdf, 'JPEG')
             reader = PdfReader(pdf)
             self.assertEqual(len(reader.pages), 3)
             for page, source in zip(reader.pages, paths):
@@ -202,8 +264,8 @@ class Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             chapters = [Chapter(f'Chapter {i}', f'https://example.org/{i}') for i in [1, 2]]
-            with patch('manga_leech.ProcessPoolExecutor', ThreadPoolExecutor), patch('manga_leech.finish_pdf', side_effect=render):
-                self.assertEqual(run_downloads(FakeClient(), chapters, root, False, 2, 1), 0)
+            with patch('manga_leech.ProcessPoolExecutor', lambda max_workers, **kwargs: ThreadPoolExecutor(max_workers=max_workers)), patch('manga_leech.finish_pdf', side_effect=render):
+                self.assertEqual(run_downloads(FakeClient(), chapters, root, False, 2, 1, write_manifest=True), 0)
             self.assertEqual(len(list(root.glob('*.pdf'))), 2)
             self.assertEqual(len(list(root.glob('*.pages.sha256'))), 2)
 
@@ -220,7 +282,7 @@ class Tests(unittest.TestCase):
             chapters = [Chapter('Chapter 1', 'https://example.org/1')]
             self.assertEqual(run_downloads(FakeClient(), chapters, root, False, 2, 1), 0)
             self.assertEqual(len(PdfReader(next(root.glob('*.pdf'))).pages), 1)
-            with patch('manga_leech.ProcessPoolExecutor', ThreadPoolExecutor), patch('manga_leech.finish_pdf', side_effect=OSError('PDF failure')):
+            with patch('manga_leech.ProcessPoolExecutor', lambda max_workers, **kwargs: ThreadPoolExecutor(max_workers=max_workers)), patch('manga_leech.finish_pdf', side_effect=OSError('PDF failure')):
                 self.assertEqual(run_downloads(FakeClient(), chapters, root, True, 2, 1), 1)
 
     def test_concurrent_download_keeps_pdf_order(self):
@@ -325,27 +387,27 @@ class Tests(unittest.TestCase):
                     return image.read_bytes()
             client = FakeClient()
             chapter = Chapter('Test', 'https://example.org/chapter')
-            download_chapter(client, chapter, root, False)
+            download_chapter(client, chapter, root, False, write_manifest=True)
             pdf = next(root.glob('*.pdf'))
             reader = PdfReader(pdf)
             self.assertEqual(len(reader.pages), 2)
             self.assertAlmostEqual(float(reader.pages[0].mediabox.height) / float(reader.pages[0].mediabox.width), 3)
-            download_chapter(client, chapter, root, False)
+            download_chapter(client, chapter, root, False, write_manifest=True)
             self.assertEqual(client.calls, 2)
             # Previous renderer signatures must rebuild using cached image files.
             manifest = next(root.glob('*.pages.sha256'))
             manifest.write_text(hashlib.sha256(b'https://example.org/1.png\nhttps://example.org/2.png').hexdigest())
             pdf.write_bytes(b'old oversized PDF')
-            download_chapter(client, chapter, root, False)
+            download_chapter(client, chapter, root, False, write_manifest=True)
             self.assertEqual(client.calls, 2)
             self.assertEqual(len(PdfReader(pdf).pages), 2)
             # Old releases wrote incomplete PDFs without a page-list manifest.
             next(root.glob('*.pages.sha256')).unlink()
             pdf.write_bytes(b'old incomplete PDF')
-            download_chapter(client, chapter, root, False)
+            download_chapter(client, chapter, root, False, write_manifest=True)
             self.assertEqual(len(PdfReader(pdf).pages), 2)
             pdf.unlink()
-            download_chapter(client, chapter, root, False)
+            download_chapter(client, chapter, root, False, write_manifest=True)
             self.assertEqual(client.calls, 2)
 
     def test_failed_image_never_publishes_pdf(self):
