@@ -91,6 +91,21 @@ class Tests(unittest.TestCase):
                 self.assertEqual(xmp.find('.//{http://calibre-ebook.com/xmp-namespace}series').text, 'your name.')
                 self.assertEqual(xmp.find('.//{http://calibre-ebook.com/xmp-namespace-series-index}series_index').text, '1.5')
 
+    def test_kapitel_series_rss_names_and_metadata(self):
+        from manga_leech import pdf_xmp
+        for label in ['Kapitel', 'Kapitel.', 'kapitel']:
+            with self.subTest(label=label):
+                page = SeriesPage()
+                page.feed(f'<a href="/chapters/ten">{label} 10</a><a href="/chapters/one">{label} 1</a><a href="/chapters/half">{label} 1.5</a>')
+                chapters = [Chapter('Monster ' + c.title, c.url) for c in page.chapters]
+                self.assertEqual([pdf_name(c) for c in sorted(chapters, key=chapter_sort_key)], ['Monster - Ch 001', 'Monster - Ch 001.5', 'Monster - Ch 010'])
+                title = f'Monster {label} 1.5'
+                rss = f'<rss><channel><item><title>{title}</title><link>/chapters/id</link></item></channel></rss>'.encode()
+                self.assertEqual(pdf_name(parse_feed(rss, 'https://example.org/rss')[0]), 'Monster - Ch 001.5')
+                xmp = ET.fromstring(pdf_xmp(title))
+                self.assertEqual(xmp.find('.//{http://calibre-ebook.com/xmp-namespace}series').text, 'Monster')
+                self.assertEqual(xmp.find('.//{http://calibre-ebook.com/xmp-namespace-series-index}series_index').text, '1.5')
+
     def test_inline_volume_series_without_show_all(self):
         class InlineClient(Client):
             def __init__(self):

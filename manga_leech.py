@@ -40,8 +40,8 @@ rl_config.useA85 = False
 # Při změně formátu zvýšíme verzi: stará PDF se přestaví z existující cache.
 PDF_FORMAT_VERSION = "original-jpeg-series-title-v5"
 # Jednotný filtr vydání pro seznam série, RSS, řazení, názvy souborů a metadata.
-# Episode se zpracuje jako kapitola (Ch); pouze Volume/Vol používá označení Vol.
-CHAPTER_LABEL = re.compile(r'\b(?:Chapter|Page|Volume|Vol|Episode)\.?\s+(\d+(?:\.\d+)?)(?=\s|$)', re.I)
+# Episode i německé Kapitel se zpracují jako kapitola (Ch); Volume/Vol používá Vol.
+CHAPTER_LABEL = re.compile(r'\b(?:Chapter|Page|Volume|Vol|Episode|Kapitel)\.?\s+(\d+(?:\.\d+)?)(?=\s|$)', re.I)
 # Tyto HTML značky nemají obsah ani vlastní zavírací značku.
 VOID_TAGS = {"img", "br", "hr", "input", "meta", "link", "source", "wbr", "area", "base", "embed", "param", "track", "col"}
 
