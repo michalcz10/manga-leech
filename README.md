@@ -2,22 +2,109 @@
 
 Python aplikace pro stažení kapitol z celé stránky série WeebCentral nebo RSS/Atom feedu a vytvoření jednoho PDF pro každou kapitolu. Obrázky vybírá pouze ze sekce `#chapter-images`, v pořadí čtečky. Každý obrázek tvoří jednu stránku PDF s původním poměrem stran, bez ořezu; dlouhé webtoonové obrázky se nedělí na A4.
 
+## Struktura projektu
+
+```text
+python/       Python aplikace a soubory requirements
+csharp/       Samostatná C# varianta (.NET 10)
+tests/        Regresní testy Python varianty
+scripts/      Build skripty
+docs/         Historická revize projektu
+build/        Hotové EXE a dočasné build soubory (ignorované Gitem)
+downloads/    Stažené kapitoly a cache (lokální)
+tmp/          Lokální diagnostické soubory (ignorované Gitem)
+```
+
+## EXE build (Windows / PowerShell)
+
+Příkazy spouštějte z kořene projektu. Pro Python build nainstalujte závislosti
+do `.venv` vytvořeného podle instalačního návodu níže:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r python/requirements-build.txt
+.\scripts\build.ps1
+
+# Volitelně jen jedna varianta
+.\scripts\build.ps1 -Target python
+.\scripts\build.ps1 -Target csharp
+```
+
+Výstupy jsou `build/python/manga_leech.exe` a `build/csharp/manga_leech.exe`.
+Python build obsahuje interpret i knihovny. C# build vyžaduje .NET SDK 10
+při sestavení a obsahuje runtime pro Windows x64; architekturu lze změnit
+parametry `-Target csharp -Runtime win-arm64` (výstup do
+`build/csharp/win-arm64/`). C# je samostatná zkušební varianta,
+Python regresní testy ji nepokrývají.
+
+C# se standardně sestavuje jako Debug kvůli licenční kontrole ImageSharp 4.
+Release (`-Configuration Release`) vyžaduje platnou licenci ImageSharp;
+podrobnosti jsou v hlavičce `csharp/Program.cs`.
+
+```powershell
+.\build\python\manga_leech.exe --help
+.\build\csharp\manga_leech.exe --help
+# Spuštění C# ze zdrojů
+dotnet run --project csharp -- --help
+```
+
+Git sleduje pouze `build/.gitkeep`, aby složka existovala i po klonování.
+EXE, mezivýsledky, virtuální prostředí a stažené kapitoly se necommitují.
+Lokální `tmp/` může obsahovat staré diagnostické výstupy a pro běh ani build
+není potřeba. Revize v `docs/PROJECT_REVIEW.md` obsahuje historické cesty
+a čísla řádků platná v době jejího vzniku.
+
+## Linux binárky
+
+C# lze sestavit i na Windows pro Linux x64; výstup obsahuje .NET runtime:
+
+```powershell
+.\scripts\build.ps1 -Target csharp -Runtime linux-x64
+```
+
+Na Linuxu soubor spusťte z kořene projektu:
+
+```bash
+chmod +x build/csharp/linux-x64/manga_leech
+./build/csharp/linux-x64/manga_leech --help
+```
+
+Výstup je pro běžné distribuce s glibc (např. Debian/Ubuntu), nikoli Alpine.
+Systémové závislosti .NET stále musí být dostupné. Linux ARM64 lze cílit
+pomocí `-Runtime linux-arm64`; dostane vlastní podsložku.
+
+Python binárku je nutné sestavit přímo na Linuxu. Použijte samostatné
+linuxové prostředí; Windows `.venv` se pro Linux použít nedá:
+
+```bash
+python3 -m venv .venv-linux
+./.venv-linux/bin/python -m pip install -r python/requirements-build.txt
+bash scripts/build-linux.sh python
+./build/python/linux-x64/manga_leech --help
+```
+
+Skript podporuje x64 a ARM64 a podle hostitele zvolí `linux-x64` nebo
+`linux-arm64`. Varianta `bash scripts/build-linux.sh all` sestaví obě aplikace
+(vyžaduje také .NET SDK 10); `csharp` sestaví pouze C#.
+Python build připravujte na nejstarší distribuci s glibc, kterou chcete
+podporovat. Linuxové binárky nemají příponu `.exe` a jejich výstupy jsou
+stejně jako Windows buildy ignorované Gitem.
+
 ## Instalace (Windows / PowerShell)
 
 Potřebujete Python 3.11 nebo novější a virtuální prostředí. Aktuální aplikace a testy byly ověřeny na Pythonu 3.12:
 
 ```powershell
 py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r python/requirements.txt
 ```
 
-Stahování používá [Requests](https://requests.readthedocs.io/en/stable/user/advanced/) s opakovaným používáním HTTP/TLS spojení. Každé download vlákno má vlastní relaci, cookies jsou společné celému běhu. Vlákna i spojení se používají napříč kapitolami a při ukončení se zavřou. Přesměrování se zpracují automaticky. Prohlížeč ani Playwright nejsou potřeba. Po aktualizaci programu znovu spusťte instalaci `requirements.txt`, protože přibyly HTTP závislosti.
+Stahování používá [Requests](https://requests.readthedocs.io/en/stable/user/advanced/) s opakovaným používáním HTTP/TLS spojení. Každé download vlákno má vlastní relaci, cookies jsou společné celému běhu. Vlákna i spojení se používají napříč kapitolami a při ukončení se zavřou. Přesměrování se zpracují automaticky. Prohlížeč ani Playwright nejsou potřeba. Po aktualizaci programu znovu spusťte instalaci `python/requirements.txt`, protože přibyly HTTP závislosti.
 
-Přesné verze ověřeného prostředí včetně testovacích knihoven jsou v `requirements-tested.txt`. Pro běžné použití stačí `requirements.txt`.
+Přesné verze ověřeného prostředí včetně testovacích knihoven jsou v `python/requirements-tested.txt`. Pro běžné použití stačí `python/requirements.txt`.
 
 ## Instalace (Linux)
 
-Příkazy spouštějte ve složce projektu, kde jsou `manga_leech.py` a `requirements.txt`. Je potřeba Python 3.11 nebo novější; testy byly ověřeny na Pythonu 3.12. Verzi dostupného Pythonu zjistíte pomocí `python3 --version`.
+Příkazy spouštějte ve složce projektu, kde jsou `python/manga_leech.py` a `python/requirements.txt`. Je potřeba Python 3.11 nebo novější; testy byly ověřeny na Pythonu 3.12. Verzi dostupného Pythonu zjistíte pomocí `python3 --version`.
 
 Na Debianu / Ubuntu nejprve nainstalujte Python a podporu virtuálních prostředí:
 
@@ -30,13 +117,13 @@ Na ostatních distribucích nainstalujte odpovídající balíčky jejich správ
 
 ```bash
 python3 -m venv .venv
-./.venv/bin/python -m pip install -r requirements.txt
+./.venv/bin/python -m pip install -r python/requirements.txt
 ```
 
 Spuštění celé série se souběžným stahováním a tvorbou PDF:
 
 ```bash
-./.venv/bin/python manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer" --workers 7 --pdf-workers 1
+./.venv/bin/python python/manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer" --workers 7 --pdf-workers 1
 ```
 
 Pro pouhý seznam přidejte `--list`, pro zkušební stažení prvního vydání `--limit 1`. PDF se ukládají do `downloads/`, pokud nezadáte jinou složku přes `-o`.
@@ -45,7 +132,7 @@ Aktivace prostředí je volitelná. Pokud chcete místo celé cesty používat j
 
 ```bash
 source .venv/bin/activate
-python manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer" --list
+python python/manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer" --list
 deactivate
 ```
 
@@ -55,19 +142,19 @@ Závislosti instalujte do virtuálního prostředí bez `sudo pip`. Prohlížeč
 
 ```powershell
 # Celá série od první kapitoly
-.\.venv\Scripts\python.exe manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer"
+.\.venv\Scripts\python.exe python/manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer"
 
 # Ověření seznamu celé série bez stahování obrázků
-.\.venv\Scripts\python.exe manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer" --list
+.\.venv\Scripts\python.exe python/manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer" --list
 
 # Všechny kapitoly ve feedu, jedno PDF na kapitolu
-.\.venv\Scripts\python.exe manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/rss"
+.\.venv\Scripts\python.exe python/manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/rss"
 
 # Nejdříve pouze seznam
-.\.venv\Scripts\python.exe manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/rss" --list
+.\.venv\Scripts\python.exe python/manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/rss" --list
 
 # Zkušebně první kapitola z feedu přes HTTP
-.\.venv\Scripts\python.exe manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/rss" --limit 1 -o downloads
+.\.venv\Scripts\python.exe python/manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/rss" --limit 1 -o downloads
 ```
 
 Pokud server vrací HTTP 403, odmítá daný požadavek. Aplikace nespouští JavaScript ani neřeší CAPTCHA nebo přihlášení. Vlastní identifikaci HTTP klienta lze nastavit pomocí `--user-agent "MujKlient/1.0"`.
@@ -93,7 +180,7 @@ Kapitoly se stahují postupně; uvnitř každé kapitoly se obrázky stahují pa
 
 ```powershell
 # Vlastní počet vláken
-.\.venv\Scripts\python.exe manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer" --workers 8 --pdf-workers 2
+.\.venv\Scripts\python.exe python/manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer" --workers 8 --pdf-workers 2
 ```
 
 PDF se ukládají do `downloads/`. Ověřené obrázky zůstávají v `downloads/.images/`, aby další spuštění mohlo navázat. Obrázky se stahují přímo do `.part` souborů a před zveřejněním cache se ověří struktura i úplné dekódování. Vedle obrázku vznikne malý soubor `.verified` s verzí kontroly a SHA-256 obsahu. Při dalším použití stačí ověřit hash; obrázek se znovu nedekóduje. Stará cache bez tohoto souboru projde jednorázovou úplnou kontrolou, takže první přestavění může být pomalejší.
@@ -103,20 +190,20 @@ Standardně se hotové PDF přeskakuje podle existence souboru a žádný `.page
 ## Testy
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install -r python/requirements-dev.txt
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
 Aktuální sada 46 testů ověřuje parsery a řazení, názvy a metadata, pořadí a rozměry stran, souběh stahování a PDF procesů, jejich recyklaci a obnovu z cache. Regresní testy kontrolují zkrácené JPEG, ověřovací otisky, přestavění PDF a změnu kvality. Lokální HTTP server ověřuje opakované použití spojení mezi kapitolami, cookies mezi vlákny, přesměrování, Referer a odmítnutí neúplných přenosů. Testy nepotřebují přístup na WeebCentral, ale prostředí musí povolit loopback spojení.
 
-PDFium porovnává vykreslené pixely jednobitových, paletových a dalších PNG; další testy kontrolují 16bitové vzorky, průhlednost, deduplikaci a původní JPEG streamy bajt po bajtu. Testovací renderer není potřeba pro běžné spuštění programu. Ověřené prostředí: Windows, Python 3.12, verze závislostí v `requirements-tested.txt`; Python 3.15 ani Linux nebyly v této revizi spuštěny.
+PDFium porovnává vykreslené pixely jednobitových, paletových a dalších PNG; další testy kontrolují 16bitové vzorky, průhlednost, deduplikaci a původní JPEG streamy bajt po bajtu. Testovací renderer není potřeba pro běžné spuštění programu. Ověřené prostředí: Windows, Python 3.12, verze závislostí v `python/requirements-tested.txt`; Python 3.15 ani Linux nebyly v této revizi spuštěny.
 
 ## Referenční kapitola 1
 
 RSS obsahuje pouze kapitoly 204–223, proto po seřazení začne kapitolou 204. Kapitolu 1 lze stáhnout přímo:
 
 ```powershell
-.\.venv\Scripts\python.exe manga_leech.py --chapter "https://weebcentral.com/chapters/01J76XZ3W1SDBG0SAGFG8RYXS4"
+.\.venv\Scripts\python.exe python/manga_leech.py --chapter "https://weebcentral.com/chapters/01J76XZ3W1SDBG0SAGFG8RYXS4"
 ```
 
 Opravený parser zpracovává i samouzavírací značky `<img />` a u referenční kapitoly načítá všech 205 obrázků.
@@ -162,7 +249,7 @@ Položky `Page 1` i `Page. 1` se zpracují stejně jako `Chapter 1`: číselné 
 Živě ověřeno na Horimiyi: úplný seznam obsahuje 136 položek a po seřazení začíná Page. 1, Page. 2, Page. 3.
 
 ```powershell
-.\.venv\Scripts\python.exe manga_leech.py "https://weebcentral.com/series/01J76XY7PBJ0A3GC5PC79VET42/Horimiya"
+.\.venv\Scripts\python.exe python/manga_leech.py "https://weebcentral.com/series/01J76XY7PBJ0A3GC5PC79VET42/Horimiya"
 ```
 
 ## Svazky Volume / Vol.

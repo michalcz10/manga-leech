@@ -13,7 +13,7 @@ from unittest.mock import patch, MagicMock
 from PIL import Image
 from pypdf import PdfReader
 
-from manga_leech import Chapter, Client, SeriesPage, chapter_sort_key, download_chapter, finish_pdf, image_urls, make_pdf, parse_feed, run_downloads, pdf_name, safe_name
+from python.manga_leech import Chapter, Client, SeriesPage, chapter_sort_key, download_chapter, finish_pdf, image_urls, make_pdf, parse_feed, run_downloads, pdf_name, safe_name
 
 
 def record_pdf_worker(*args):
@@ -36,7 +36,7 @@ class Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             chapters = [Chapter(f'Test Chapter {i}', f'https://example.org/{i}') for i in range(1, 6)]
-            with patch('manga_leech.finish_pdf', record_pdf_worker):
+            with patch('python.manga_leech.finish_pdf', record_pdf_worker):
                 self.assertEqual(run_downloads(FakeClient(), chapters, root, False, 2, 1, pdf_tasks_per_child=2), 0)
             pids = [path.read_text() for path in sorted(root.glob('*.pid'))]
             self.assertEqual(len(pids), 5)
@@ -79,7 +79,7 @@ class Tests(unittest.TestCase):
             self.assertEqual(client.calls, 1)
 
     def test_episode_series_rss_names_and_metadata(self):
-        from manga_leech import pdf_xmp
+        from python.manga_leech import pdf_xmp
         for label in ['Episode', 'Episode.', 'episode']:
             with self.subTest(label=label):
                 page = SeriesPage()
@@ -94,7 +94,7 @@ class Tests(unittest.TestCase):
                 self.assertEqual(xmp.find('.//{http://calibre-ebook.com/xmp-namespace-series-index}series_index').text, '1.5')
 
     def test_kapitel_series_rss_names_and_metadata(self):
-        from manga_leech import pdf_xmp
+        from python.manga_leech import pdf_xmp
         for label in ['Kapitel', 'Kapitel.', 'kapitel']:
             with self.subTest(label=label):
                 page = SeriesPage()
@@ -121,7 +121,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(client.calls, 1)
 
     def test_volume_metadata_rss_and_decimal_names(self):
-        from manga_leech import pdf_xmp
+        from python.manga_leech import pdf_xmp
         for label in ['Volume', 'Volume.', 'Vol', 'Vol.']:
             title = f'My Manga {label} 2.5'
             rss = f'<rss><channel><item><title>{title}</title><link>/chapters/id</link></item></channel></rss>'.encode()
@@ -204,7 +204,7 @@ class Tests(unittest.TestCase):
         opener = MagicMock()
         opener.open.return_value = response
         ticks = iter(i * .6 for i in range(100))
-        with patch.object(client, 'thread_opener', return_value=opener), patch('manga_leech.time.monotonic', side_effect=lambda: next(ticks)), patch('manga_leech.time.sleep'), self.assertLogs('manga-leech', level='WARNING') as logs:
+        with patch.object(client, 'thread_opener', return_value=opener), patch('python.manga_leech.time.monotonic', side_effect=lambda: next(ticks)), patch('python.manga_leech.time.sleep'), self.assertLogs('manga-leech', level='WARNING') as logs:
             with self.assertRaises(TimeoutError):
                 client.get('https://example.org/slow')
         self.assertEqual(opener.open.call_count, 3)
@@ -219,7 +219,7 @@ class Tests(unittest.TestCase):
         response.headers = {'Content-Length': '3'}
         opener = MagicMock()
         opener.open.side_effect = [urllib.error.HTTPError('https://example.org/image', 429, 'Rate limit', {'Retry-After': '0'}, None), response]
-        with patch.object(client, 'thread_opener', return_value=opener), patch('manga_leech.time.sleep'), self.assertLogs('manga-leech', level='WARNING') as logs:
+        with patch.object(client, 'thread_opener', return_value=opener), patch('python.manga_leech.time.sleep'), self.assertLogs('manga-leech', level='WARNING') as logs:
             self.assertEqual(client.get('https://example.org/image'), b'abc')
         self.assertIn('example.org', client.cooldowns)
         self.assertTrue(any('HTTP 429' in line for line in logs.output))
@@ -234,7 +234,7 @@ class Tests(unittest.TestCase):
         response.headers = {'Content-Length': '100'}
         opener = MagicMock()
         opener.open.return_value = response
-        with patch.object(client, 'thread_opener', return_value=opener), patch('manga_leech.time.sleep'), self.assertLogs('manga-leech', level='WARNING'):
+        with patch.object(client, 'thread_opener', return_value=opener), patch('python.manga_leech.time.sleep'), self.assertLogs('manga-leech', level='WARNING'):
             with self.assertRaises(Exception):
                 client.get('https://example.org/truncated')
         self.assertEqual(opener.open.call_count, 3)
@@ -249,7 +249,7 @@ class Tests(unittest.TestCase):
                 paths.append(path)
             pdf = root / 'original.pdf'
             # A JPEG must never be expanded into raw pixels just to compute a hash.
-            with patch('manga_leech.ImageReader.getRGBData', side_effect=AssertionError('JPEG pixel decode')):
+            with patch('python.manga_leech.ImageReader.getRGBData', side_effect=AssertionError('JPEG pixel decode')):
                 make_pdf(paths, pdf, 'JPEG')
             reader = PdfReader(pdf)
             self.assertEqual(len(reader.pages), 3)
@@ -281,7 +281,7 @@ class Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             chapters = [Chapter(f'Chapter {i}', f'https://example.org/{i}') for i in [1, 2]]
-            with patch('manga_leech.ProcessPoolExecutor', lambda max_workers, **kwargs: ThreadPoolExecutor(max_workers=max_workers)), patch('manga_leech.finish_pdf', side_effect=render):
+            with patch('python.manga_leech.ProcessPoolExecutor', lambda max_workers, **kwargs: ThreadPoolExecutor(max_workers=max_workers)), patch('python.manga_leech.finish_pdf', side_effect=render):
                 self.assertEqual(run_downloads(FakeClient(), chapters, root, False, 2, 1, write_manifest=True), 0)
             self.assertEqual(len(list(root.glob('*.pdf'))), 2)
             self.assertEqual(len(list(root.glob('*.pages.sha256'))), 2)
@@ -299,7 +299,7 @@ class Tests(unittest.TestCase):
             chapters = [Chapter('Chapter 1', 'https://example.org/1')]
             self.assertEqual(run_downloads(FakeClient(), chapters, root, False, 2, 1), 0)
             self.assertEqual(len(PdfReader(next(root.glob('*.pdf'))).pages), 1)
-            with patch('manga_leech.ProcessPoolExecutor', lambda max_workers, **kwargs: ThreadPoolExecutor(max_workers=max_workers)), patch('manga_leech.finish_pdf', side_effect=OSError('PDF failure')):
+            with patch('python.manga_leech.ProcessPoolExecutor', lambda max_workers, **kwargs: ThreadPoolExecutor(max_workers=max_workers)), patch('python.manga_leech.finish_pdf', side_effect=OSError('PDF failure')):
                 self.assertEqual(run_downloads(FakeClient(), chapters, root, True, 2, 1), 1)
 
     def test_concurrent_download_keeps_pdf_order(self):

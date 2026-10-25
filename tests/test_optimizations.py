@@ -15,7 +15,7 @@ from PIL import Image, ImageDraw
 from pypdf import PdfReader
 import pypdfium2 as pdfium
 
-from manga_leech import (Chapter, Client, download_chapter, finish_pdf, main,
+from python.manga_leech import (Chapter, Client, download_chapter, finish_pdf, main,
                          make_pdf, run_downloads, valid_image)
 
 
@@ -102,7 +102,7 @@ class OptimizationTests(unittest.TestCase):
             data = image_bytes()
             path.write_bytes(data)
             self.assertTrue(valid_image(path))
-            with patch('manga_leech.validate_image', side_effect=AssertionError('Repeated decode')):
+            with patch('python.manga_leech.validate_image', side_effect=AssertionError('Repeated decode')):
                 self.assertTrue(valid_image(path))
             # The file has changed even when its length stays unchanged.
             path.write_bytes(data[:len(data) // 2] + b'\0' * (len(data) - len(data) // 2))
@@ -122,7 +122,7 @@ class OptimizationTests(unittest.TestCase):
     def test_http_truncation_is_retried_and_never_published(self):
         with local_server() as (client, base, records, jpeg), tempfile.TemporaryDirectory() as directory:
             client.prefetched_html[base + '/chapter/1'] = '<section id="chapter-images"><img src="/truncated"></section>'
-            with patch('manga_leech.time.sleep'), self.assertLogs('manga-leech', level='WARNING'):
+            with patch('python.manga_leech.time.sleep'), self.assertLogs('manga-leech', level='WARNING'):
                 with self.assertRaises(RuntimeError):
                     download_chapter(client, Chapter('Test Chapter 1', base + '/chapter/1'), Path(directory), False)
             self.assertEqual(sum(r[0] == '/truncated' for r in records), 3)
@@ -132,16 +132,16 @@ class OptimizationTests(unittest.TestCase):
     def test_download_threads_reuse_connection_between_chapters(self):
         with local_server() as (client, base, records, jpeg), tempfile.TemporaryDirectory() as directory:
             chapters = [Chapter(f'Test Chapter {i}', base + f'/chapter/{i}') for i in (1, 2)]
-            with patch('manga_leech.ProcessPoolExecutor', lambda max_workers, **kw: ThreadPoolExecutor(max_workers=max_workers)):
+            with patch('python.manga_leech.ProcessPoolExecutor', lambda max_workers, **kw: ThreadPoolExecutor(max_workers=max_workers)):
                 self.assertEqual(run_downloads(client, chapters, Path(directory), False, 1, 1), 0)
             self.assertEqual(len({r[1] for r in records if r[0] == '/image'}), 1)
 
     def test_direct_chapter_uses_initial_html_once_and_closes_client(self):
         with local_server() as (client, base, records, jpeg), tempfile.TemporaryDirectory() as directory:
-            with patch('manga_leech.Client', return_value=client), \
-                    patch('manga_leech.ProcessPoolExecutor', lambda max_workers, **kw: ThreadPoolExecutor(max_workers=max_workers)), \
+            with patch('python.manga_leech.Client', return_value=client), \
+                    patch('python.manga_leech.ProcessPoolExecutor', lambda max_workers, **kw: ThreadPoolExecutor(max_workers=max_workers)), \
                     patch.object(client, 'close', wraps=client.close) as close, \
-                    patch('manga_leech.logging.basicConfig'):
+                    patch('python.manga_leech.logging.basicConfig'):
                 self.assertEqual(main(['--chapter', base + '/chapter/1', '-o', directory]), 0)
                 close.assert_called_once()
             self.assertEqual(Counter(r[0] for r in records)['/chapter/1'], 1)
@@ -152,7 +152,7 @@ class OptimizationTests(unittest.TestCase):
             with self.subTest(status=status):
                 opener = MagicMock()
                 opener.open.side_effect = urllib.error.HTTPError('https://example.org', status, 'error', {'Retry-After': '86400'}, None)
-                with patch.object(client, 'thread_opener', return_value=opener), patch('manga_leech.time.sleep') as sleep, self.assertLogs('manga-leech', level='WARNING'):
+                with patch.object(client, 'thread_opener', return_value=opener), patch('python.manga_leech.time.sleep') as sleep, self.assertLogs('manga-leech', level='WARNING'):
                     with self.assertRaises(urllib.error.HTTPError):
                         client.get('https://example.org')
                 self.assertEqual(opener.open.call_count, 1)
@@ -163,7 +163,7 @@ class OptimizationTests(unittest.TestCase):
     def test_cooldown_is_checked_after_per_thread_delay(self):
         client = Client(60, 0.5)
         order = []
-        with patch('manga_leech.time.sleep', side_effect=lambda n: order.append('delay')), \
+        with patch('python.manga_leech.time.sleep', side_effect=lambda n: order.append('delay')), \
                 patch.object(client, 'wait_for_host', side_effect=lambda host: order.append('cooldown')), \
                 patch.object(client, 'thread_opener', side_effect=ValueError('stop')):
             with self.assertRaises(ValueError):
@@ -180,7 +180,7 @@ class OptimizationTests(unittest.TestCase):
         second.headers = {'Content-Length': '7'}
         opener = MagicMock()
         opener.open.side_effect = [first, second]
-        with tempfile.TemporaryDirectory() as directory, patch.object(client, 'thread_opener', return_value=opener), patch('manga_leech.time.sleep'), self.assertLogs('manga-leech', level='WARNING'):
+        with tempfile.TemporaryDirectory() as directory, patch.object(client, 'thread_opener', return_value=opener), patch('python.manga_leech.time.sleep'), self.assertLogs('manga-leech', level='WARNING'):
             target = Path(directory) / 'image.part'
             client.download('https://example.org', target)
             self.assertEqual(target.read_bytes(), b'correct')

@@ -14,6 +14,7 @@ import http.cookiejar
 import http.client
 import logging
 import math
+import multiprocessing
 import re
 import struct
 import sys
@@ -861,4 +862,5 @@ def main(argv=None) -> int:
 
 # Ochrana je nutná i pro Windows: PDF proces při importu nesmí spustit celý program.
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     sys.exit(main())

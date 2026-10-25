@@ -1,7 +1,40 @@
+# Local environments and Python caches
 .venv/
+.venv-linux/
+venv/
 __pycache__/
+*.py[cod]
 *.egg-info/
-downloads/
-tmp/
-chapter-sample.html
-feed-sample.xml
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build outputs (Python and C#)
+/build/*
+!/build/.gitkeep
+/dist/
+*.spec
+**/bin/
+**/obj/
+
+# Downloaded content and local diagnostics
+/downloads/
+/tmp/
+/chapter-sample.html
+/feed-sample.xml
+
+# Local agent/editor settings and secrets
+/.codex/
+/.agents/
+.vs/
+.idea/
+.vscode/
+.env
+.env.*
+!.env.example
+sixlabors.lic
+*.user
+*.suo
+Thumbs.db
+.DS_Store
