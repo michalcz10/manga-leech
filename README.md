@@ -10,133 +10,132 @@ csharp/       Samostatná C# varianta (.NET 10)
 tests/        Regresní testy Python varianty
 scripts/      Build skripty
 docs/         Historická revize projektu
-build/        Hotové EXE a dočasné build soubory (ignorované Gitem)
+build/        Hotové binárky a dočasné build soubory (ignorované Gitem)
 downloads/    Stažené kapitoly a cache (lokální)
 tmp/          Lokální diagnostické soubory (ignorované Gitem)
 ```
 
-## EXE build (Windows / PowerShell)
+## Build obou variant (Python + C#)
 
-Příkazy spouštějte z kořene projektu. Pro Python build nainstalujte závislosti
-do `.venv` vytvořeného podle instalačního návodu níže:
+Všechny příkazy spouštějte z kořene projektu. Potřebujete **Python 3.11+**
+(ověřeno na 3.12), **.NET SDK 10** a připojení k internetu pro stažení
+závislostí. Na Linuxu navíc potřebujete Bash a podporu `python3 -m venv`
+(na Debianu/Ubuntu balíček `python3-venv`).
+
+### Windows / PowerShell
+
+Celý blok vytvoří `.venv`, nainstaluje Python závislosti včetně PyInstalleru,
+sestaví obě EXE a ověří jejich spuštění:
 
 ```powershell
+py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r python/requirements-build.txt
-.\scripts\build.ps1
-
-# Volitelně jen jedna varianta
-.\scripts\build.ps1 -Target python
-.\scripts\build.ps1 -Target csharp
-```
-
-Výstupy jsou `build/python/manga_leech.exe` a `build/csharp/manga_leech.exe`.
-Python build obsahuje interpret i knihovny. C# build vyžaduje .NET SDK 10
-při sestavení a obsahuje runtime pro Windows x64; architekturu lze změnit
-parametry `-Target csharp -Runtime win-arm64` (výstup do
-`build/csharp/win-arm64/`). C# je samostatná zkušební varianta,
-Python regresní testy ji nepokrývají.
-
-C# se standardně sestavuje jako Debug kvůli licenční kontrole ImageSharp 4.
-Release (`-Configuration Release`) vyžaduje platnou licenci ImageSharp;
-podrobnosti jsou v hlavičce `csharp/Program.cs`.
-
-```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1 -Target all
 .\build\python\manga_leech.exe --help
 .\build\csharp\manga_leech.exe --help
-# Spuštění C# ze zdrojů
-dotnet run --project csharp -- --help
 ```
 
-Git sleduje pouze `build/.gitkeep`, aby složka existovala i po klonování.
-EXE, mezivýsledky, virtuální prostředí a stažené kapitoly se necommitují.
-Lokální `tmp/` může obsahovat staré diagnostické výstupy a pro běh ani build
-není potřeba. Revize v `docs/PROJECT_REVIEW.md` obsahuje historické cesty
-a čísla řádků platná v době jejího vzniku.
+Výstupy:
 
-## Linux binárky
+- Python: `build/python/manga_leech.exe`
+- C#: `build/csharp/manga_leech.exe`
 
-C# lze sestavit i na Windows pro Linux x64; výstup obsahuje .NET runtime:
+### Linux / Bash
 
-```powershell
-.\scripts\build.ps1 -Target csharp -Runtime linux-x64
-```
-
-Na Linuxu soubor spusťte z kořene projektu:
+Celý blok vytvoří `.venv`, nainstaluje Python závislosti včetně PyInstalleru
+a sestaví obě binárky. Proměnná `PYTHON` předá build skriptu stejné prostředí,
+jaké používáte pro běžné spouštění:
 
 ```bash
-chmod +x build/csharp/linux-x64/manga_leech
+python3 -m venv .venv && \
+./.venv/bin/python -m pip install -r python/requirements-build.txt && \
+PYTHON=./.venv/bin/python bash scripts/build-linux.sh all
+```
+
+Na Linuxu x64 ověřte spuštění:
+
+```bash
+./build/python/linux-x64/manga_leech --help
 ./build/csharp/linux-x64/manga_leech --help
 ```
 
-Výstup je pro běžné distribuce s glibc (např. Debian/Ubuntu), nikoli Alpine.
-Systémové závislosti .NET stále musí být dostupné. Linux ARM64 lze cílit
-pomocí `-Runtime linux-arm64`; dostane vlastní podsložku.
+Výstupy:
 
-Python binárku je nutné sestavit přímo na Linuxu. Použijte samostatné
-linuxové prostředí; Windows `.venv` se pro Linux použít nedá:
+- Python: `build/python/linux-x64/manga_leech`
+- C#: `build/csharp/linux-x64/manga_leech`
 
-```bash
-python3 -m venv .venv-linux
-./.venv-linux/bin/python -m pip install -r python/requirements-build.txt
-bash scripts/build-linux.sh python
-./build/python/linux-x64/manga_leech --help
+Na ARM64 skript automaticky používá podsložky `linux-arm64` místo
+`linux-x64`. Linuxové binárky nemají příponu `.exe`. Při kopírování na jiný
+stroj případně obnovte právo spuštění pomocí `chmod +x cesta/k/manga_leech`.
+
+Python build vzniká pro systém a architekturu, na kterých běží PyInstaller.
+Windows a Linux proto sestavujte každý na příslušném systému a `.venv`
+mezi nimi nesdílejte. Linuxový návod je určen pro distribuce s glibc
+(např. Debian/Ubuntu); build připravujte na nejstarší podporované distribuci.
+C# build obsahuje .NET runtime, systémové závislosti Linuxu jsou stále potřeba.
+
+### Další možnosti buildu
+
+Jen jednu variantu sestavíte pomocí `-Target python` / `-Target csharp`
+ve Windows nebo argumentem `python` / `csharp` místo `all` na Linuxu.
+Při použití linuxového skriptu zachovejte prefix `PYTHON=./.venv/bin/python`;
+bez něj skript hledá prostředí `.venv-linux`.
+
+C# lze sestavit na Windows také pro Linux či Windows ARM64:
+
+```powershell
+.\scripts\build.ps1 -Target csharp -Runtime linux-x64
+.\scripts\build.ps1 -Target csharp -Runtime win-arm64
 ```
 
-Skript podporuje x64 a ARM64 a podle hostitele zvolí `linux-x64` nebo
-`linux-arm64`. Varianta `bash scripts/build-linux.sh all` sestaví obě aplikace
-(vyžaduje také .NET SDK 10); `csharp` sestaví pouze C#.
-Python build připravujte na nejstarší distribuci s glibc, kterou chcete
-podporovat. Linuxové binárky nemají příponu `.exe` a jejich výstupy jsou
-stejně jako Windows buildy ignorované Gitem.
+Výstup dostane vlastní složku `build/csharp/linux-x64/`, respektive
+`build/csharp/win-arm64/`. C# je samostatná zkušební varianta;
+Python regresní testy ji nepokrývají.
 
-## Instalace (Windows / PowerShell)
+C# se standardně sestavuje jako **Debug** kvůli licenční kontrole ImageSharp 4.
+Release vyžaduje platnou licenci ImageSharp. Ve Windows přidejte
+`-Configuration Release`, na Linuxu nastavte `CONFIGURATION=Release`
+před build příkazem. Podrobnosti jsou v hlavičce `csharp/Program.cs`.
 
-Potřebujete Python 3.11 nebo novější a virtuální prostředí. Aktuální aplikace a testy byly ověřeny na Pythonu 3.12:
+Git sleduje pouze `build/.gitkeep`. Binárky, mezivýsledky, virtuální prostředí
+a stažené kapitoly se necommitují. Lokální `tmp/` není pro běh ani build
+potřeba. Historická revize je v `docs/PROJECT_REVIEW.md`.
+
+## Spuštění Pythonu přes .venv (bez buildu)
+
+Pro běžný běh stačí `python/requirements.txt`. Pokud jste už provedli build
+podle návodu výše, můžete použít stejné `.venv`; runtime závislosti už obsahuje.
+Aktivace virtuálního prostředí není pro následující příkazy potřeba.
+
+### Windows / PowerShell
+
+Instalace a spuštění celé série v jednom bloku:
 
 ```powershell
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r python/requirements.txt
+.\.venv\Scripts\python.exe python/manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer" --workers 7 --pdf-workers 1
 ```
 
-Stahování používá [Requests](https://requests.readthedocs.io/en/stable/user/advanced/) s opakovaným používáním HTTP/TLS spojení. Každé download vlákno má vlastní relaci, cookies jsou společné celému běhu. Vlákna i spojení se používají napříč kapitolami a při ukončení se zavřou. Přesměrování se zpracují automaticky. Prohlížeč ani Playwright nejsou potřeba. Po aktualizaci programu znovu spusťte instalaci `python/requirements.txt`, protože přibyly HTTP závislosti.
+### Linux / Bash
 
-Přesné verze ověřeného prostředí včetně testovacích knihoven jsou v `python/requirements-tested.txt`. Pro běžné použití stačí `python/requirements.txt`.
-
-## Instalace (Linux)
-
-Příkazy spouštějte ve složce projektu, kde jsou `python/manga_leech.py` a `python/requirements.txt`. Je potřeba Python 3.11 nebo novější; testy byly ověřeny na Pythonu 3.12. Verzi dostupného Pythonu zjistíte pomocí `python3 --version`.
-
-Na Debianu / Ubuntu nejprve nainstalujte Python a podporu virtuálních prostředí:
+Instalace a spuštění celé série v jednom bloku:
 
 ```bash
-sudo apt update
-sudo apt install python3 python3-venv python3-pip
-```
-
-Na ostatních distribucích nainstalujte odpovídající balíčky jejich správcem balíčků. Potom vytvořte virtuální prostředí a nainstalujte závislosti:
-
-```bash
-python3 -m venv .venv
-./.venv/bin/python -m pip install -r python/requirements.txt
-```
-
-Spuštění celé série se souběžným stahováním a tvorbou PDF:
-
-```bash
+python3 -m venv .venv && \
+./.venv/bin/python -m pip install -r python/requirements.txt && \
 ./.venv/bin/python python/manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer" --workers 7 --pdf-workers 1
 ```
 
-Pro pouhý seznam přidejte `--list`, pro zkušební stažení prvního vydání `--limit 1`. PDF se ukládají do `downloads/`, pokud nezadáte jinou složku přes `-o`.
+Pro pouhý seznam přidejte `--list`, pro zkušební stažení prvního vydání
+`--limit 1`. PDF se ukládají do `downloads/`, pokud nezadáte jinou složku přes
+`-o`. Při dalších spuštěních stačí poslední příkaz s cestou k Pythonu v `.venv`.
 
-Aktivace prostředí je volitelná. Pokud chcete místo celé cesty používat jen `python`:
-
-```bash
-source .venv/bin/activate
-python python/manga_leech.py "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer" --list
-deactivate
-```
-
-Závislosti instalujte do virtuálního prostředí bez `sudo pip`. Prohlížeč, Playwright ani externí program pro tvorbu PDF nejsou potřeba.
+Stahování používá Requests; prohlížeč, Playwright ani externí program pro tvorbu
+PDF nejsou potřeba. Po aktualizaci aplikace znovu nainstalujte
+`python/requirements.txt`. Závislosti instalujte do virtuálního prostředí
+bez `sudo pip`. Přesné verze ověřeného prostředí včetně testovacích knihoven
+jsou v `python/requirements-tested.txt`.
 
 ## Použití
 
