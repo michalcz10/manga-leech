@@ -2,7 +2,7 @@ namespace MangaLeech.Core;
 
 internal static class ChapterParser
 {
-    internal static readonly Regex Label = new(@"\b(?:Chapter|Page|Volume|Vol|Episode|Kapitel)\.?\s+(\d+(?:\.\d+)?)(?=\s|$)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    internal static readonly Regex Label = new(@"\b(?:Chapter|Page|Volume|Vol|Episode|Kapitel|Act|Battle|Round|Circle|Vision)\.?\s+(\d+(?:\.\d+)?)(?=\s|$)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     internal static Match? LastLabel(string title) => Label.Matches(title).Cast<Match>().LastOrDefault();
     internal static (string Title, string? Number) Metadata(string title)
     {
