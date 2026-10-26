@@ -1,22 +1,15 @@
-# Local environments and Python caches
-.venv/
-.venv-linux/
-venv/
-__pycache__/
-*.py[cod]
-*.egg-info/
-.pytest_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-
-# Build outputs (Python and C#)
-/build/*
-!/build/.gitkeep
-/dist/
-*.spec
+# .NET build and publish outputs
+/build/
 **/bin/
 **/obj/
+
+# .NET test and coverage results
+**/TestResults/
+*.trx
+*.coverage
+*.coveragexml
+coverage.cobertura.xml
+coverage.opencover.xml
 
 # Downloaded content and local diagnostics
 /downloads/
@@ -33,8 +26,9 @@ htmlcov/
 .env
 .env.*
 !.env.example
-sixlabors.lic
 *.user
 *.suo
+*.sln.docstates
+*.DotSettings.user
 Thumbs.db
 .DS_Store
