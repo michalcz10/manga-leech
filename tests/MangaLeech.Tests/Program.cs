@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Text.Json;
 using System.Xml.Linq;
 using MangaLeech.Core;
 using SkiaSharp;
@@ -10,6 +11,7 @@ var tests = new (string Name, Func<Task> Run)[]
 {
     ("CLI defaults and validation", TestOptions),
     ("RSS/Atom, image selection, ordering and metadata", TestParsing),
+    ("Site selection and MangaFire languages, releases, decimal chapters and reader pages", TestMangaFire),
     ("PDF streams, transparency, page order, XMP and xref", TestPdf),
     ("Strict image validation and cache repair", TestValidation),
     ("PNG palette and bit depth preservation", TestPng),
@@ -98,6 +100,53 @@ static Task TestParsing()
     var images = ImageUrls("<img src='/ad'/><div id='chapter-images'><img src='/1'/><img data-src='/2' src='/placeholder'/></div>", "https://example.test/chapter");
     Check(images.SequenceEqual(new[] { "https://example.test/1", "https://example.test/2" }), "Wrong image selection/order.");
     return Task.CompletedTask;
+}
+
+static async Task TestMangaFire()
+{
+    const string url = "https://mangafire.to/title/52l90-domination";
+    var options = Options.Parse([url]);
+    Check(options.Language == "en", "MangaFire should default to English.");
+    Check(Options.Parse([url, "--language", "PT-BR"]).Language == "pt-br", "Regional language code rejected.");
+    Throws<ArgumentException>(() => Options.Parse([url, "--language", "../en"]));
+    await using var site = new MangaFireSite(options);
+    await using var registered = SiteRegistry.For(url, options);
+    await using var other = SiteRegistry.For("https://example.test/rss", options);
+    Check(registered is MangaFireSite && other is WeebCentralSite, "Wrong site selected.");
+    await using var lookalike = SiteRegistry.For("https://mangafire.to.example.test/title/test", options);
+    Check(lookalike is WeebCentralSite, "MangaFire host match is too broad.");
+    Check(MangaFireSite.ParseUrl(url) == ("52l90-domination", null), "Title URL failed.");
+    Check(MangaFireSite.ParseUrl(url + "/chapter/123/") == ("52l90-domination", "123"), "Chapter URL failed.");
+    Throws<ArgumentException>(() => MangaFireSite.ParseUrl(url + "/volume/123"));
+    using var first = JsonDocument.Parse("""
+        {"items":[
+          {"id":10,"number":2.5,"language":"en","type":"unofficial"},
+          {"id":20,"number":2.5,"language":"fr","type":"official"},
+          {"id":11,"number":1,"language":"en","type":"unofficial"}]}
+        """);
+    using var second = JsonDocument.Parse("""
+        {"items":[
+          {"id":30,"number":"2.50","language":"en","type":"official"},
+          {"id":31,"number":2.5,"language":"en","type":"unofficial"},
+          {"id":11,"number":1,"language":"en","type":"unofficial"}]}
+        """);
+    var selected = new Dictionary<string, (Chapter Chapter, bool Official)>();
+    site.AddChapters(first.RootElement, "Domination", url, selected);
+    site.AddChapters(second.RootElement, "Domination", url, selected);
+    Check(selected.Count == 2 && selected["2.5"].Chapter.Url == url + "/chapter/30", "Language, cross-page deduplication or official preference failed.");
+    Check(PdfName(selected["2.5"].Chapter) == "Domination - Ch 002.5", "Decimal MangaFire filename failed.");
+    using var reader = JsonDocument.Parse("""
+        {"data":{"title":{"name":"Domination"},"number":2.5,"pages":[
+          {"url":"/second.png"},{"url":"https://cdn.example.test/first.png"},{"url":"/second.png"}]}}
+        """);
+    var (chapter, images) = MangaFireSite.ParseChapter(reader.RootElement, url + "/chapter/30");
+    Check(chapter.Title == "Domination Chapter 2.5" && images.SequenceEqual(new[] {
+        "https://mangafire.to/second.png", "https://cdn.example.test/first.png", "https://mangafire.to/second.png"
+    }), "MangaFire reader order or repeated pages changed.");
+    using var empty = JsonDocument.Parse("""{"data":{"title":{"name":"Domination"},"number":1,"pages":[]}}""");
+    Throws<InvalidDataException>(() => MangaFireSite.ParseChapter(empty.RootElement, url));
+    using var unsafeReader = JsonDocument.Parse("""{"data":{"title":{"name":"Domination"},"number":1,"pages":[{"url":"file:///etc/passwd"}]}}""");
+    Throws<ArgumentException>(() => MangaFireSite.ParseChapter(unsafeReader.RootElement, url));
 }
 
 static Task TestPdf()

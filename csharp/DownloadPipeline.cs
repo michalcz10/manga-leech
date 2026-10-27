@@ -6,8 +6,9 @@ internal static class DownloadPipeline
 {
     internal const string PdfVersion = "csharp-skia-lossless-v2";
     private sealed record PdfJob(Chapter Chapter, string[] Paths, string Output, string Manifest, string Signature);
-    internal static async Task<int> Run(Client client, List<Chapter> chapters, Options options, CancellationToken cancellationToken)
+    internal static async Task<int> Run(Client client, List<Chapter> chapters, Options options, CancellationToken cancellationToken, IMangaSite? site = null)
     {
+        site ??= new WeebCentralSite();
         // Validate the entire selection before any worker can write a conflicting file.
         chapters = chapters.DistinctBy(chapter => chapter.Url).ToList();
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -73,7 +74,7 @@ internal static class DownloadPipeline
                         return;
                     }
 
-                    var urls = ImageUrls(await client.ChapterHtml(chapter.Url, token), chapter.Url);
+                    var urls = await site.GetImages(client, chapter.Url, token);
                     string manifest = Path.ChangeExtension(output, ".pages.sha256");
                     string signature = Hash(PdfVersion + $"\njpeg_quality={options.JpegQuality}\n" + chapter.Title + "\n" + string.Join("\n", urls));
                     if (File.Exists(output) && options.Manifest && File.Exists(manifest) && File.ReadAllText(manifest) == signature && !options.Force && !options.Rebuild)

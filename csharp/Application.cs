@@ -21,26 +21,14 @@ internal static class Application
             }
 
             using var client = new Client(o);
+            string url = HttpUrl(o.Chapter ?? o.Source!);
+            await using var site = SiteRegistry.For(url, o);
             List<Chapter> chapters;
             if (o.Chapter != null)
-            {
-                string url = HttpUrl(o.Chapter), html = await client.GetText(url, null, cancel.Token);
-                client.Prefetched[url] = html;
-                string title = Text(Html(html).DocumentNode.SelectSingleNode("//title"));
-                var parts = title.Split(" | ").Select(p => p.Trim()).ToArray();
-                if (parts.Length >= 3 && Label.Match(parts[0]) is { Success: true } m && m.Length == parts[0].Length)
-                    title = parts[1] + " " + parts[0];
-                else if (title.EndsWith(" | Weeb Central"))
-                    title = title[..^15].Trim();
-                if (title.Length == 0)
-                    throw new InvalidDataException("Cannot determine a chapter title for PDF metadata.");
-                chapters = [new Chapter(title, url)];
-            }
+                chapters = [await site.GetChapter(client, url, cancel.Token)];
             else
             {
-                string url = HttpUrl(o.Source!);
-                string path = new Uri(url).AbsolutePath.TrimEnd('/');
-                chapters = path.StartsWith("/series/") && !path.EndsWith("/rss") ? await client.Series(url, cancel.Token) : Feed(await client.Get(url, null, cancel.Token), url);
+                chapters = await site.GetChapters(client, url, cancel.Token);
                 var comparer = Comparer<Chapter>.Create((a, b) => o.Newest ? CompareChapters(b, a) : CompareChapters(a, b));
                 chapters = chapters.OrderBy(ch => ch, comparer).ToList();
                 Log($"Source contains {chapters.Count} chapters.");
@@ -56,7 +44,7 @@ internal static class Application
             }
 
             Directory.CreateDirectory(o.Output);
-            return await DownloadPipeline.Run(client, chapters, o, cancel.Token);
+            return await DownloadPipeline.Run(client, chapters, o, cancel.Token, site);
         }
         catch (OperationCanceledException) when (cancel.IsCancellationRequested)
         {

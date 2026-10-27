@@ -3,13 +3,16 @@ namespace MangaLeech.Core;
 internal static class CommandHelp
 {
     internal const string Text = """
-        Manga Leech (.NET 10) - one PDF per chapter from a series or RSS/Atom feed.
+        Manga Leech (.NET 10) - WeebCentral, MangaFire, RSS/Atom to chapter PDFs.
         manga_leech URL [options]
         manga_leech --chapter URL [options]
           -h, --help             Show help
           -o, --output DIR       Output directory (downloads)
           --list                 List chapters without downloading images
           --limit N              First N chapters after sorting
+          --language CODE        MangaFire chapter language (en)
+          --browser-channel NAME MangaFire browser (Windows: msedge; other: chromium)
+          --browser-headed       Show MangaFire browser for troubleshooting/challenges
           --oldest-first         Ascending chapter number (default)
           --newest-first         Descending chapter number
           --workers N            Global concurrent image downloads (8)

@@ -1,6 +1,6 @@
 # Manga Leech
 
-C# / .NET 10 CLI for downloading a WeebCentral series, RSS/Atom feed, or a single chapter into one PDF per chapter. Images come exclusively from `#chapter-images` in reader order. Each image becomes a page with its original aspect ratio, without cropping or splitting long webtoons. Python is no longer required.
+C# / .NET 10 CLI for downloading a WeebCentral or MangaFire series, RSS/Atom feed, or a single chapter into one PDF per chapter. Site adapters select images in reader order. Each image becomes a page with its original aspect ratio, without cropping or splitting long webtoons. Python is no longer required.
 
 ## Build
 
@@ -30,6 +30,7 @@ Run directly with the SDK, or substitute the published executable for `dotnet ru
 dotnet run --project csharp -- "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/The-Greatest-Estate-Developer" --limit 3
 dotnet run --project csharp -- "https://weebcentral.com/series/01J76XYF6V9BDFSRRTY2C65SBS/rss" --list
 dotnet run --project csharp -- --chapter "https://weebcentral.com/chapters/01J76XZ3W1SDBG0SAGFG8RYXS4"
+dotnet run --project csharp -- "https://mangafire.to/title/52l90-domination" --language en --limit 3
 ```
 
 | Parameter | Meaning / default |
@@ -40,6 +41,9 @@ dotnet run --project csharp -- --chapter "https://weebcentral.com/chapters/01J76
 | `-o`, `--output DIR` | Output directory: `downloads` |
 | `--list` | List selected chapters without downloading images |
 | `--limit N` | First N chapters after sorting; positive integer |
+| `--language CODE` | MangaFire language, language code, e.g. `en` or `pt-br`; default `en` |
+| `--browser-channel NAME` | MangaFire Playwright browser; Windows default `msedge`, other platforms bundled `chromium` |
+| `--browser-headed` | Show the MangaFire browser for troubleshooting or interactive website challenges |
 | `--oldest-first` | Ascending numeric chapter order (default) |
 | `--newest-first` | Descending numeric chapter order |
 | `--workers N` | **8** simultaneous image transfers in total across all chapters |
@@ -58,6 +62,10 @@ Worker counts accept 1â€“1024. `--pdf-tasks-per-child` from Python is unsup
 
 ## Concurrency, cache and PDFs
 
+MangaFire's current `/title/SLUG` application signs API requests in JavaScript. Its adapter runs the actual application in a Playwright browser and reads its chapter/page API responses. Windows uses installed Microsoft Edge by default. To use bundled Chromium instead, build first, run `pwsh csharp/bin/Release/net10.0/playwright.ps1 install chromium`, then pass `--browser-channel chromium` (the default on Linux; `install --with-deps chromium` also installs Linux system dependencies). Published builds also include `playwright.ps1` beside the executable. Browser installation is separate from publishing. Use `--browser-headed` if the site presents an interactive challenge; completion is not guaranteed. WeebCentral and RSS do not launch a browser.
+
+MangaFire visits every chapter-list page, filters the chosen language, and keeps one release per chapter number, preferring an official release when available. This avoids duplicate PDF filenames. `--chapter` accepts current `/title/SLUG/chapter/ID` links. Older `/manga/` and `/read/` URLs are not supported. The common sorting and `--limit` are applied after discovery.
+
 Three chapter downloads share eight image slots. Completed chapters enter a bounded queue of at most twice `--pdf-workers`; four PDF workers drain it while downloading continues. Sorting determines selection and scheduling, while chapters may finish in a different order. The image limit stays global as the chapter count increases. This allows requests to overlap across chapters; actual throughput depends on the server. HTTP 429/503 pauses new requests to the same host using `Retry-After` (maximum 120 seconds); each transfer has at most three attempts. The application does not handle CAPTCHA or login.
 
 Images live under `downloads/.images/` with SHA-256 verification receipts. Downloads and PDFs use temporary `.part` files and are published only after success. Exit codes: `0` success, `1` failure, `130` Ctrl+C. Failure of one chapter does not stop others. Ctrl+C cancels queued/network work and waits for active PDF operations to observe cancellation; native image decoding/compression can delay that briefly. Running two instances into the same output directory is unsupported.
@@ -68,7 +76,7 @@ JPEG streams and compatible opaque, non-interlaced PNG streams are embedded unch
 
 ## Development
 
-`csharp/` separates CLI/options, parsing, HTTP retries, image cache, bounded download pipeline and PDF writing. `tests/MangaLeech.Tests/` contains a dependency-free regression runner with a local HTTP server; tests need loopback networking and do not contact WeebCentral.
+`csharp/` separates CLI/options, parsing, HTTP retries, image cache, bounded download pipeline and PDF writing. `csharp/Sites/IMangaSite.cs` defines chapter discovery, single-chapter metadata, image discovery and disposal. Each site has its own adapter (`WeebCentralSite`, `MangaFireSite`); register additional adapters in `SiteRegistry`. `Application` handles common sorting and limits, and `DownloadPipeline` handles cache, downloads and PDF creation. `Client` only handles HTTP transfers. `tests/MangaLeech.Tests/` contains a regression runner with a local HTTP server; tests need loopback networking and do not contact live manga sites.
 
 ```sh
 dotnet build csharp/MangaLeech.csproj -c Release
@@ -81,4 +89,4 @@ After publishing, also test native decoding through the Windows executable:
 dotnet run --project tests/MangaLeech.Tests -c Release -- --published build/csharp/win-x64/manga_leech.exe
 ```
 
-Dependencies: HtmlAgilityPack and SkiaSharp (MIT); no paid license is needed for Release builds. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). `docs/PROJECT_REVIEW.md` describes the historical Python implementation.
+Dependencies: HtmlAgilityPack and SkiaSharp (MIT), Microsoft.Playwright (Apache-2.0); no paid license is needed for Release builds. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). `docs/PROJECT_REVIEW.md` describes the historical Python implementation.
