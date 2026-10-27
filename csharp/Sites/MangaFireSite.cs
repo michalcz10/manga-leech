@@ -4,8 +4,6 @@ namespace MangaLeech.Core;
 
 internal sealed class MangaFireSite(Options options) : IMangaSite
 {
-    private MangaFireSigner? signer;
-    private readonly SemaphoreSlim initialize = new(1);
     private readonly ConcurrentDictionary<string, List<string>> prefetched = new();
 
     internal static (string Slug, string? ChapterId) ParseUrl(string url)
@@ -16,30 +14,10 @@ internal sealed class MangaFireSite(Options options) : IMangaSite
         return (match.Groups[1].Value, match.Groups[2].Success ? match.Groups[2].Value : null);
     }
 
-    private async Task<MangaFireSigner> Signer(Client client, string basis, CancellationToken ct)
-    {
-        await initialize.WaitAsync(ct);
-        try
-        {
-            if (signer != null) return signer;
-            var document = Html(await client.GetText(basis, null, ct));
-            string? module = document.DocumentNode.Descendants("link")
-                .Where(node => node.GetAttributeValue("rel", "") == "modulepreload")
-                .Select(node => WebUtility.HtmlDecode(node.GetAttributeValue("href", "")))
-                .FirstOrDefault(href => Regex.IsMatch(href, @"(?:^|/)polyfill[^/]*\.js(?:\?|$)"));
-            if (module == null)
-                throw new InvalidDataException("MangaFire signing module was not found. The site may have changed or returned a browser challenge.");
-            string source = await client.GetText(HttpUrl(module, basis), basis, ct);
-            signer = new MangaFireSigner(source, options.Timeout, ct);
-            return signer;
-        }
-        finally { initialize.Release(); }
-    }
-
     private async Task<JsonDocument> Api(Client client, string basis, string path, Dictionary<string, string> parameters, CancellationToken ct)
     {
-        var currentSigner = await Signer(client, basis, ct);
-        string signature = currentSigner.Sign(path, parameters);
+        ct.ThrowIfCancellationRequested();
+        string signature = MangaFireSigner.Sign(path, parameters);
         string query = string.Join("&", parameters.OrderBy(pair => pair.Key, StringComparer.Ordinal)
             .Select(pair => Uri.EscapeDataString(pair.Key) + "=" + Uri.EscapeDataString(pair.Value)));
         string url = SameHost("/api" + path, basis) + "?" + (query.Length > 0 ? query + "&" : "") + "vrf=" + Uri.EscapeDataString(signature);
@@ -143,8 +121,6 @@ internal sealed class MangaFireSite(Options options) : IMangaSite
 
     public ValueTask DisposeAsync()
     {
-        signer?.Dispose();
-        initialize.Dispose();
         return ValueTask.CompletedTask;
     }
 }

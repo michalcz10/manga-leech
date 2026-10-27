@@ -30,6 +30,16 @@ internal sealed class LocalServer : IAsyncDisposable
         accepting = Accept();
     }
 
+    // Reference signatures from the original JavaScript, not the code under test.
+    private static readonly Dictionary<string, string> MangaSignatures = new()
+    {
+        ["/titles/fixture"] = "8sK3xtqdFdv6BM031c2U",
+        ["/titles/fixture/chapters?language=en&limit=100&order=asc&page=1&sort=number"] = "8sK3xtqdFdv6BM031c2U0rWQQ6vJu9rm5Msk-Sb6UX-Iy_I6tm2YFvnMRWBx5oC4ARwU6TDfdvmcnPYwWfLNlp-wDodS6tfgDCOn",
+        ["/titles/fixture/chapters?language=en&limit=100&order=asc&page=2&sort=number"] = "8sK3xtqdFdv6BM031c2U0rWQQ6vJu9rm5Msk-Sb6UX-Iy_I6tm2YFvnMRWBx5oC4ARwU6TDfdvmcnPYwWfJ3FWUF0HfkqgjwLA9C",
+        ["/chapters/2"] = "8vPRXa1JjvVTxjA",
+        ["/chapters/3"] = "8vPRXa1JjvVTxuY",
+    };
+
     private async Task Accept()
     {
         try
@@ -64,24 +74,18 @@ internal sealed class LocalServer : IAsyncDisposable
                 byte[] body;
                 int status = 200;
                 string extra = "";
-                if (path.StartsWith("/title/fixture"))
-                {
-                    body = Encoding.UTF8.GetBytes("<link rel='modulepreload' href='/polyfill-fixture.js'>");
-                }
-                else if (path == "/polyfill-fixture.js")
-                {
-                    body = Encoding.UTF8.GetBytes("globalThis.getProtectionToken = (path,params) => btoa(path + '|' + (params.page || '') + '|' + (params.language || '')); export {getProtectionToken};");
-                }
-                else if (path.StartsWith("/api/"))
+                if (path.StartsWith("/api/"))
                 {
                     var requestUri = new Uri(Url + path);
                     var parameters = requestUri.Query.TrimStart('?').Split('&').Select(part => part.Split('=', 2))
                         .ToDictionary(parts => Uri.UnescapeDataString(parts[0]), parts => Uri.UnescapeDataString(parts[1]));
                     string apiPath = requestUri.AbsolutePath[4..];
                     parameters.TryGetValue("page", out string? page);
-                    parameters.TryGetValue("language", out string? language);
-                    string signature = Convert.ToBase64String(Encoding.Latin1.GetBytes(apiPath + "|" + page + "|" + language));
-                    if (!parameters.TryGetValue("vrf", out string? supplied) || supplied != signature)
+                    string canonical = string.Join("&", parameters.Where(pair => pair.Key != "vrf")
+                        .OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => pair.Key + "=" + pair.Value));
+                    string signedInput = apiPath + (canonical.Length == 0 ? "" : "?" + canonical);
+                    if (!MangaSignatures.TryGetValue(signedInput, out string? signature) ||
+                        !parameters.TryGetValue("vrf", out string? supplied) || supplied != signature)
                     {
                         status = 403;
                         body = Encoding.UTF8.GetBytes("{\"message\":\"Bad signature\"}");

@@ -6,7 +6,6 @@
     <AssemblyName>manga_leech</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Jint" Version="4.17.0" />
     <PackageReference Include="HtmlAgilityPack" Version="1.13.1" />
     <PackageReference Include="SkiaSharp" Version="3.119.4" />
     <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="3.119.4" />

@@ -86,16 +86,15 @@ Worker counts accept 1â€“1024. `--pdf-tasks-per-child` from Python is unsup
 
 ## Concurrency, cache and PDFs
 
-MangaFire uses the same HTTP client as WeebCentral. Its small signing module is
-fetched once per run and evaluated by Jint inside .NET to sign the API requests.
-No browser, Node process, rendering, advertisements or other site modules run.
-The interpreter has an execution timeout, a 20-million-statement budget, a 128 MB
-allocation limit per operation, cancellation support, and no network/filesystem/CLR
-APIs. This limit is not a cap on the entire application process. Signatures are
-serialized; API and image transfers retain their normal concurrency. If the site
-changes its signing module or requires a browser challenge, the request fails
-with an error; a browser is never launched as a fallback. The old `--browser-*`
-options have been removed.
+MangaFire uses the same HTTP client as WeebCentral. API signatures are calculated
+in native C# using three substitution/feedback rounds over UTF-8 bytes, followed
+by URL-safe Base64. No JavaScript is downloaded or interpreted, and no browser,
+Node.js, Jint or background process is needed. The protocol constants are documented
+in `csharp/Sites/MangaFireSigner.cs` and tested against 1,000 reference signatures
+from the original site module. If MangaFire changes its signing algorithm or
+requires a browser challenge, the request fails with an error and the native
+signer must be updated; there is no interpreter or browser fallback. The old
+`--browser-*` options have been removed.
 
 For low-powered machines, reduce download/PDF concurrency:
 
@@ -115,7 +114,7 @@ JPEG streams and compatible opaque, non-interlaced PNG streams are embedded unch
 
 ## Development
 
-`csharp/` separates CLI/options, parsing, HTTP retries, image cache, bounded download pipeline and PDF writing. `csharp/Sites/IMangaSite.cs` defines chapter discovery, single-chapter metadata, image discovery and disposal. Each site has its own adapter (`WeebCentralSite`, `MangaFireSite`); register additional adapters in `SiteRegistry`. `Application` handles common sorting and limits, and `DownloadPipeline` handles cache, downloads and PDF creation. `Client` only handles HTTP transfers. `tests/MangaLeech.Tests/` contains a regression runner with a local HTTP server and signing sandbox fixtures; tests need loopback networking and do not contact live manga sites.
+`csharp/` separates CLI/options, parsing, HTTP retries, image cache, bounded download pipeline and PDF writing. `csharp/Sites/IMangaSite.cs` defines chapter discovery, single-chapter metadata, image discovery and disposal. Each site has its own adapter (`WeebCentralSite`, `MangaFireSite`); register additional adapters in `SiteRegistry`. `Application` handles common sorting and limits, and `DownloadPipeline` handles cache, downloads and PDF creation. `Client` only handles HTTP transfers. `tests/MangaLeech.Tests/` contains a regression runner with a local HTTP server and independent native-signature reference vectors; tests need loopback networking and do not contact live manga sites.
 
 ```sh
 dotnet build csharp/MangaLeech.csproj -c Release
@@ -128,6 +127,6 @@ After publishing, also test native decoding through the Windows executable:
 dotnet run --project tests/MangaLeech.Tests -c Release -- --published build/csharp/win-x64/manga_leech.exe
 ```
 
-Dependencies: HtmlAgilityPack and SkiaSharp (MIT), Jint (BSD-2-Clause), Acornima (BSD-3-Clause); no paid license is needed for Release builds. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). `docs/PROJECT_REVIEW.md` describes the historical Python implementation.
+Dependencies: HtmlAgilityPack and SkiaSharp (MIT); no paid license is needed for Release builds. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). `docs/PROJECT_REVIEW.md` describes the historical Python implementation.
 
 Packaging checks: `python -m unittest discover -s tests/Packaging.Tests`.

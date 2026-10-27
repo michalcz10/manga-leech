@@ -13,7 +13,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("RSS/Atom, image selection, ordering and metadata", TestParsing),
     ("Site selection and MangaFire languages, releases, decimal chapters and reader pages", TestMangaFire),
     ("MangaFire signed HTTP discovery, paging, concurrency and metadata prefetch", TestMangaFireHttp),
-    ("MangaFire signer sandbox limits and missing signing function", TestMangaFireSandbox),
+    ("Native MangaFire signer reference vectors, UTF-8 and query ordering", TestMangaFireSigner),
     ("PDF streams, transparency, page order, XMP and xref", TestPdf),
     ("Strict image validation and cache repair", TestValidation),
     ("PNG palette and bit depth preservation", TestPng),
@@ -168,24 +168,41 @@ static async Task TestMangaFireHttp()
     Check(server.Hits.Values.Sum() == requests, "Prefetch repeated the chapter API request.");
     var results = await Task.WhenAll(chapters.Select(chapter => site.GetImages(client, chapter.Url, CancellationToken.None)));
     Check(results.All(images => images.Single() == server.Url + "/image/1/1"), "Concurrent signing failed.");
-    Check(server.Hits["/polyfill-fixture.js"] == 1 && server.Hits["/title/fixture-series"] == 1,
-        "The signing module should be loaded once per site instance.");
+    Check(server.Hits.Keys.All(path => path.StartsWith("/api/")), "Native signing fetched HTML or JavaScript.");
 }
 
-static Task TestMangaFireSandbox()
+static Task TestMangaFireSigner()
 {
-    Throws<InvalidDataException>(() => new MangaFireSigner("var x=1;", 1, CancellationToken.None));
-    using var signer = new MangaFireSigner("globalThis.getProtectionToken=(path,params)=>[typeof fetch,typeof require,typeof importNamespace].join(',');", 1, CancellationToken.None);
-    Check(signer.Sign("/titles/test", new Dictionary<string,string>()) == "undefined,undefined,undefined", "Sandbox exposed host network/Node/CLR access.");
-    using var looping = new MangaFireSigner("globalThis.getProtectionToken=()=>{while(true){}};", 0.05, CancellationToken.None);
-    bool stopped = false;
-    try { looping.Sign("/titles/test", new Dictionary<string,string>()); }
-    catch (Exception e) when (e.GetType().Namespace?.StartsWith("Jint") == true || e is TimeoutException) { stopped = true; }
-    Check(stopped, "An infinite signer exceeded its execution budget.");
-    using var cancel = new CancellationTokenSource();
-    using var cancellable = new MangaFireSigner("globalThis.getProtectionToken=()=>{while(true){}};", 5, cancel.Token);
-    cancel.Cancel();
-    Throws<OperationCanceledException>(() => cancellable.Sign("/titles/test", new Dictionary<string,string>()));
+    // These outputs were recorded from the original website module, independently
+    // of the C# implementation. See the source module hash in MangaFireSigner.
+    var vectors = new (string Input, string Expected)[]
+    {
+        ("", ""),
+        ("A", "3A"),
+        ("AAAA", "3A3ibg"),
+        ("/titles/52l90", "8sK3xtqdFdtKnGAytg"),
+        ("/chapters/6249894", "8vPRXa1JjvVTxuDiS4eXfTo"),
+        ("\u017elu\u0165ou\u010dk\u00fd \ud83d\ude00", "a8dIQZvOxUmaR-_0yLitE-oc"),
+        ("\u65e5\u672c\u8a9e", "6SmDqDRPSHaO"),
+        ("a&b = c", "z5YsefP3Mw"),
+        ("\u0000\u00ff", "48PA"),
+    };
+    foreach (var (input, expected) in vectors)
+        Check(MangaFireSigner.Encode(input) == expected, "Native signature mismatch for " + JsonSerializer.Serialize(input));
+    using var digest = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+    for (int k = 0; k < 1000; k++)
+    {
+        string input = k < 9 ? vectors[k].Input : k == 9 ? new string('x', 1024)
+            : new string(Enumerable.Range(0, k % 150).Select(i => (char)(32 + (k * 13 + i * 53) % 90)).ToArray());
+        digest.AppendData(Encoding.UTF8.GetBytes(MangaFireSigner.Encode(input) + "\n"));
+    }
+    Check(Convert.ToHexString(digest.GetHashAndReset()).ToLowerInvariant() == "f39ec1c20940ada08af5391b258e72728c7ba2f18f002b80e04158254ef377ee",
+        "Native signer differs from the 1000-input JavaScript reference corpus.");
+    var query = new Dictionary<string, string> { ["b"] = "space here", ["a"] = "x+y&z", ["vrf"] = "ignored" };
+    Check(MangaFireSigner.Sign("/titles/52l90/chapters", query) == "8sK3xtqdFdtKnGAytlnP4U-wU_buolkNPe0tmRKhzXWaSWjpFejysi5u7Q",
+        "Query values must be signed in sorted, decoded form and must exclude vrf.");
+    Check(MangaFireSigner.Sign("/titles/52l90/chapters", new Dictionary<string, string> { ["z"] = "~!*()'_", ["a"] = "žluťoučký 😀" }) == "8sK3xtqdFdtKnGAytlnP4U-wU_buolkNPZI3fu0jAy0l827AtmbiIMdoFxtzZrlHuxoNF_s",
+        "Unicode query signing failed.");
     return Task.CompletedTask;
 }
 
