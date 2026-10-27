@@ -11,8 +11,6 @@ internal static class CommandHelp
           --list                 List chapters without downloading images
           --limit N              First N chapters after sorting
           --language CODE        MangaFire chapter language (en)
-          --browser-channel NAME MangaFire browser (Windows: msedge; other: chromium)
-          --browser-headed       Show MangaFire browser for troubleshooting/challenges
           --oldest-first         Ascending chapter number (default)
           --newest-first         Descending chapter number
           --workers N            Global concurrent image downloads (8)

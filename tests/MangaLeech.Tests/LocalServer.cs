@@ -64,7 +64,41 @@ internal sealed class LocalServer : IAsyncDisposable
                 byte[] body;
                 int status = 200;
                 string extra = "";
-                if (path.StartsWith("/image/"))
+                if (path.StartsWith("/title/fixture"))
+                {
+                    body = Encoding.UTF8.GetBytes("<link rel='modulepreload' href='/polyfill-fixture.js'>");
+                }
+                else if (path == "/polyfill-fixture.js")
+                {
+                    body = Encoding.UTF8.GetBytes("globalThis.getProtectionToken = (path,params) => btoa(path + '|' + (params.page || '') + '|' + (params.language || '')); export {getProtectionToken};");
+                }
+                else if (path.StartsWith("/api/"))
+                {
+                    var requestUri = new Uri(Url + path);
+                    var parameters = requestUri.Query.TrimStart('?').Split('&').Select(part => part.Split('=', 2))
+                        .ToDictionary(parts => Uri.UnescapeDataString(parts[0]), parts => Uri.UnescapeDataString(parts[1]));
+                    string apiPath = requestUri.AbsolutePath[4..];
+                    parameters.TryGetValue("page", out string? page);
+                    parameters.TryGetValue("language", out string? language);
+                    string signature = Convert.ToBase64String(Encoding.Latin1.GetBytes(apiPath + "|" + page + "|" + language));
+                    if (!parameters.TryGetValue("vrf", out string? supplied) || supplied != signature)
+                    {
+                        status = 403;
+                        body = Encoding.UTF8.GetBytes("{\"message\":\"Bad signature\"}");
+                    }
+                    else if (apiPath == "/titles/fixture")
+                        body = Encoding.UTF8.GetBytes("{\"data\":{\"title\":\"HTTP Series\"}}");
+                    else if (apiPath == "/titles/fixture/chapters")
+                    {
+                        string items = page == "1"
+                            ? "{\"id\":1,\"number\":1,\"language\":\"en\",\"type\":\"unofficial\"}"
+                            : "{\"id\":2,\"number\":1,\"language\":\"en\",\"type\":\"official\"},{\"id\":3,\"number\":2.5,\"language\":\"en\",\"type\":\"unofficial\"}";
+                        body = Encoding.UTF8.GetBytes($"{{\"items\":[{items}],\"meta\":{{\"page\":{page},\"lastPage\":2}}}}");
+                    }
+                    else
+                        body = Encoding.UTF8.GetBytes("{\"data\":{\"title\":{\"name\":\"HTTP Series\"},\"number\":1,\"pages\":[{\"url\":\"/image/1/1\"}]}}");
+                }
+                else if (path.StartsWith("/image/"))
                 {
                     string chapter = path.Split('/')[2];
                     lock (gate)

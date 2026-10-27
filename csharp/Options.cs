@@ -15,8 +15,6 @@ internal sealed class Options
     public bool Help { get; private set; }
     public bool DeleteImageCache { get; private set; }
     public string Language { get; private set; } = "en";
-    public string? BrowserChannel { get; private set; } = OperatingSystem.IsWindows() ? "msedge" : null;
-    public bool BrowserHeaded { get; private set; }
     public int Workers { get; private set; } = 8;
     public int PdfWorkers { get; private set; } = 4;
     public int ChapterWorkers { get; private set; } = 3;
@@ -45,13 +43,6 @@ internal sealed class Options
                     o.Language = Value().ToLowerInvariant();
                     if (!Regex.IsMatch(o.Language, "^[a-z]{2}(?:-[a-z]{2})?$"))
                         throw new ArgumentException("--language requires a language code (e.g. en, pt-br).");
-                    break;
-                case "--browser-channel":
-                    string channel = Value();
-                    o.BrowserChannel = channel == "chromium" ? null : channel;
-                    break;
-                case "--browser-headed":
-                    o.BrowserHeaded = true;
                     break;
                 case "-o":
                 case "--output":

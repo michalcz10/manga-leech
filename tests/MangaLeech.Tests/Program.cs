@@ -12,6 +12,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("CLI defaults and validation", TestOptions),
     ("RSS/Atom, image selection, ordering and metadata", TestParsing),
     ("Site selection and MangaFire languages, releases, decimal chapters and reader pages", TestMangaFire),
+    ("MangaFire signed HTTP discovery, paging, concurrency and metadata prefetch", TestMangaFireHttp),
+    ("MangaFire signer sandbox limits and missing signing function", TestMangaFireSandbox),
     ("PDF streams, transparency, page order, XMP and xref", TestPdf),
     ("Strict image validation and cache repair", TestValidation),
     ("PNG palette and bit depth preservation", TestPng),
@@ -147,6 +149,44 @@ static async Task TestMangaFire()
     Throws<InvalidDataException>(() => MangaFireSite.ParseChapter(empty.RootElement, url));
     using var unsafeReader = JsonDocument.Parse("""{"data":{"title":{"name":"Domination"},"number":1,"pages":[{"url":"file:///etc/passwd"}]}}""");
     Throws<ArgumentException>(() => MangaFireSite.ParseChapter(unsafeReader.RootElement, url));
+}
+
+static async Task TestMangaFireHttp()
+{
+    using var scratch = new Scratch();
+    await using var server = new LocalServer(ImageBytes());
+    var options = Settings(scratch.Path);
+    using var client = new Client(options);
+    await using var site = new MangaFireSite(options);
+    string url = server.Url + "/title/fixture-series";
+    var chapters = await site.GetChapters(client, url, CancellationToken.None);
+    Check(chapters.Count == 2 && chapters[0].Url.EndsWith("/chapter/2"), "HTTP paging or official release selection failed.");
+    Check(chapters[1].Title == "HTTP Series Chapter 2.5", "HTTP metadata failed.");
+    var direct = await site.GetChapter(client, chapters[0].Url, CancellationToken.None);
+    int requests = server.Hits.Values.Sum();
+    Check((await site.GetImages(client, direct.Url, CancellationToken.None)).Count == 1, "Direct chapter images were not prefetched.");
+    Check(server.Hits.Values.Sum() == requests, "Prefetch repeated the chapter API request.");
+    var results = await Task.WhenAll(chapters.Select(chapter => site.GetImages(client, chapter.Url, CancellationToken.None)));
+    Check(results.All(images => images.Single() == server.Url + "/image/1/1"), "Concurrent signing failed.");
+    Check(server.Hits["/polyfill-fixture.js"] == 1 && server.Hits["/title/fixture-series"] == 1,
+        "The signing module should be loaded once per site instance.");
+}
+
+static Task TestMangaFireSandbox()
+{
+    Throws<InvalidDataException>(() => new MangaFireSigner("var x=1;", 1, CancellationToken.None));
+    using var signer = new MangaFireSigner("globalThis.getProtectionToken=(path,params)=>[typeof fetch,typeof require,typeof importNamespace].join(',');", 1, CancellationToken.None);
+    Check(signer.Sign("/titles/test", new Dictionary<string,string>()) == "undefined,undefined,undefined", "Sandbox exposed host network/Node/CLR access.");
+    using var looping = new MangaFireSigner("globalThis.getProtectionToken=()=>{while(true){}};", 0.05, CancellationToken.None);
+    bool stopped = false;
+    try { looping.Sign("/titles/test", new Dictionary<string,string>()); }
+    catch (Exception e) when (e.GetType().Namespace?.StartsWith("Jint") == true || e is TimeoutException) { stopped = true; }
+    Check(stopped, "An infinite signer exceeded its execution budget.");
+    using var cancel = new CancellationTokenSource();
+    using var cancellable = new MangaFireSigner("globalThis.getProtectionToken=()=>{while(true){}};", 5, cancel.Token);
+    cancel.Cancel();
+    Throws<OperationCanceledException>(() => cancellable.Sign("/titles/test", new Dictionary<string,string>()));
+    return Task.CompletedTask;
 }
 
 static Task TestPdf()

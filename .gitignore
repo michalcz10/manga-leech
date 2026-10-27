@@ -14,6 +14,7 @@ coverage.opencover.xml
 # Downloaded content and local diagnostics
 /downloads/
 /tmp/
+__pycache__/
 /chapter-sample.html
 /feed-sample.xml
 

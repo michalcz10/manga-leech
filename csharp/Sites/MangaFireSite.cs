@@ -1,40 +1,12 @@
 using System.Text.Json;
-using Microsoft.Playwright;
 
 namespace MangaLeech.Core;
 
-// Let the site's application make its own signed API requests. No copied signing
-// algorithm or JavaScript bundle is stored in the downloader.
 internal sealed class MangaFireSite(Options options) : IMangaSite
 {
-    private IPlaywright? playwright;
-    private IBrowser? browser;
-    private IBrowserContext? context;
+    private MangaFireSigner? signer;
     private readonly SemaphoreSlim initialize = new(1);
     private readonly ConcurrentDictionary<string, List<string>> prefetched = new();
-
-    private async Task<IBrowserContext> Context(CancellationToken ct)
-    {
-        await initialize.WaitAsync(ct);
-        try
-        {
-            if (context != null) return context;
-            playwright ??= await Playwright.CreateAsync().WaitAsync(ct);
-            browser = await playwright.Chromium.LaunchAsync(new()
-            {
-                Channel = options.BrowserChannel,
-                Headless = !options.BrowserHeaded
-            }).WaitAsync(ct);
-            context = await browser.NewContextAsync(new());
-            context.SetDefaultTimeout((float)(options.Timeout * 1000));
-            return context;
-        }
-        catch (PlaywrightException e)
-        {
-            throw new InvalidOperationException("MangaFire needs a Playwright Chromium browser. On Windows install Edge, or install Chromium with the generated playwright.ps1 and use --browser-channel chromium. " + e.Message, e);
-        }
-        finally { initialize.Release(); }
-    }
 
     internal static (string Slug, string? ChapterId) ParseUrl(string url)
     {
@@ -44,85 +16,76 @@ internal sealed class MangaFireSite(Options options) : IMangaSite
         return (match.Groups[1].Value, match.Groups[2].Success ? match.Groups[2].Value : null);
     }
 
-    private async Task<JsonDocument> Response(IPage page, string path, Func<Task> action, CancellationToken ct, int? pageNumber = null)
+    private async Task<MangaFireSigner> Signer(Client client, string basis, CancellationToken ct)
     {
-
-        var pending = page.WaitForResponseAsync(response =>
-        {
-            var uri = new Uri(response.Url);
-            return uri.Authority == new Uri(page.Url).Authority && uri.AbsolutePath == path &&
-                (pageNumber == null || Regex.IsMatch(uri.Query, $@"[?&]page={pageNumber}(?:&|$)"));
-        });
+        await initialize.WaitAsync(ct);
         try
         {
-            await action().WaitAsync(ct);
-            var response = await pending.WaitAsync(ct);
-            if (!response.Ok)
-                throw new InvalidDataException($"MangaFire API returned HTTP {response.Status}. Try --browser-headed if the website requires a browser challenge.");
-            return JsonDocument.Parse(await response.TextAsync().WaitAsync(ct));
+            if (signer != null) return signer;
+            var document = Html(await client.GetText(basis, null, ct));
+            string? module = document.DocumentNode.Descendants("link")
+                .Where(node => node.GetAttributeValue("rel", "") == "modulepreload")
+                .Select(node => WebUtility.HtmlDecode(node.GetAttributeValue("href", "")))
+                .FirstOrDefault(href => Regex.IsMatch(href, @"(?:^|/)polyfill[^/]*\.js(?:\?|$)"));
+            if (module == null)
+                throw new InvalidDataException("MangaFire signing module was not found. The site may have changed or returned a browser challenge.");
+            string source = await client.GetText(HttpUrl(module, basis), basis, ct);
+            signer = new MangaFireSigner(source, options.Timeout, ct);
+            return signer;
         }
-        catch (System.TimeoutException e)
-        {
+        finally { initialize.Release(); }
+    }
 
-            throw new InvalidDataException("MangaFire did not return chapter data in time. Try --browser-headed to inspect a browser challenge, or increase --timeout. " + e.Message, e);
-        }
-        finally
+    private async Task<JsonDocument> Api(Client client, string basis, string path, Dictionary<string, string> parameters, CancellationToken ct)
+    {
+        var currentSigner = await Signer(client, basis, ct);
+        string signature = currentSigner.Sign(path, parameters);
+        string query = string.Join("&", parameters.OrderBy(pair => pair.Key, StringComparer.Ordinal)
+            .Select(pair => Uri.EscapeDataString(pair.Key) + "=" + Uri.EscapeDataString(pair.Value)));
+        string url = SameHost("/api" + path, basis) + "?" + (query.Length > 0 ? query + "&" : "") + "vrf=" + Uri.EscapeDataString(signature);
+        try
         {
-            // Observe a waiter rejected when navigation/cancellation closes the page.
-            if (!pending.IsCompletedSuccessfully)
-                _ = pending.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+            return JsonDocument.Parse(await client.GetText(url, basis, ct));
+        }
+        catch (HttpRequestException e) when (e.StatusCode == HttpStatusCode.Forbidden)
+        {
+            throw new InvalidDataException("MangaFire rejected the signed HTTP request (403). Its signature or browser protection may have changed; no browser is started automatically.", e);
+        }
+        catch (JsonException e)
+        {
+            throw new InvalidDataException("MangaFire returned non-JSON API data, possibly a browser challenge.", e);
         }
     }
 
     public async Task<List<Chapter>> GetChapters(Client client, string url, CancellationToken ct)
     {
         var (slug, chapterId) = ParseUrl(url);
+        if (chapterId != null) throw new ArgumentException("Use --chapter for a MangaFire chapter URL.");
         string titleId = slug.Split('-')[0];
-        if (chapterId != null)
-            throw new ArgumentException("Use --chapter for a MangaFire chapter URL.");
-        var page = await (await Context(ct)).NewPageAsync().WaitAsync(ct);
-        try
+        using var detail = await Api(client, url, $"/titles/{titleId}", [], ct);
+        string name = detail.RootElement.GetProperty("data").GetProperty("title").GetString()?.Trim() ?? "";
+        if (name.Length == 0) throw new InvalidDataException("MangaFire title is empty.");
+        var selected = new Dictionary<string, (Chapter Chapter, bool Official)>();
+        int last = 1;
+        for (int number = 1; number <= last; number++)
         {
-            // Switch the app's default language filter to All, then filter locally
-            // after every page so releases can be selected consistently.
-            using var initial = await Response(page, $"/api/titles/{titleId}/chapters",
-                async () => { await page.GotoAsync(url, new() { WaitUntil = WaitUntilState.DOMContentLoaded }); }, ct);
-            await page.Locator("button.select").Filter(new() { HasTextRegex = new Regex("^Lang", RegexOptions.IgnoreCase) })
-                .DispatchEventAsync("click").WaitAsync(ct);
-            using var first = await Response(page, $"/api/titles/{titleId}/chapters", async () =>
+            using var response = await Api(client, url, $"/titles/{titleId}/chapters", new()
             {
-                await page.GetByRole(AriaRole.Button, new() { Name = "All", Exact = true }).DispatchEventAsync("click");
-            }, ct, 1);
-            string name = (await page.Locator("h1").First.InnerTextAsync().WaitAsync(ct)).Trim();
-            if (name.Length == 0) throw new InvalidDataException("MangaFire title is empty.");
-            var selected = new Dictionary<string, (Chapter Chapter, bool Official)>();
-            AddChapters(first.RootElement, name, url, selected);
-            Log($"MangaFire: received chapter-list page {first.RootElement.GetProperty("meta").GetProperty("page")} of {first.RootElement.GetProperty("meta").GetProperty("lastPage")}");
-            int last = first.RootElement.GetProperty("meta").GetProperty("lastPage").GetInt32();
-            int current = first.RootElement.GetProperty("meta").GetProperty("page").GetInt32();
-            if (current != 1 || last < 1 || last > 10000)
+                ["language"] = options.Language, ["sort"] = "number", ["order"] = "asc",
+                ["limit"] = "100", ["page"] = number.ToString(CultureInfo.InvariantCulture)
+            }, ct);
+            var root = response.RootElement;
+            int page = root.GetProperty("meta").GetProperty("page").GetInt32();
+            int reportedLast = root.GetProperty("meta").GetProperty("lastPage").GetInt32();
+            if (page != number || reportedLast < 1 || reportedLast > 10000 || (number > 1 && reportedLast != last))
                 throw new InvalidDataException("Unexpected MangaFire pagination metadata.");
-            for (int number = 2; number <= last; number++)
-            {
-                await page.Locator(".title-detail__chapters-pager [aria-current=page]").Filter(new() { HasTextRegex = new Regex($"^{number - 1}$") }).WaitForAsync().WaitAsync(ct);
-                await Task.Delay(TimeSpan.FromSeconds(options.Delay), ct);
-                // Dispatch to the actual React button: the site's advertisement
-                // overlay can intercept physical clicks near the last page.
-                using var next = await Response(page, $"/api/titles/{titleId}/chapters", async () =>
-                {
-                    await page.Locator(".title-detail__chapters-pager")
-                        .GetByRole(AriaRole.Button, new() { Name = number.ToString(CultureInfo.InvariantCulture), Exact = true }).DispatchEventAsync("click");
-                }, ct, number);
-                if (next.RootElement.GetProperty("meta").GetProperty("page").GetInt32() != number)
-                    throw new InvalidDataException("MangaFire returned an unexpected chapter page.");
-                AddChapters(next.RootElement, name, url, selected);
-                Log($"MangaFire: received chapter-list page {number} of {last}");
-            }
-            if (selected.Count == 0)
-                throw new InvalidDataException($"MangaFire has no chapters in language '{options.Language}'. Use --language CODE.");
-            return selected.Values.Select(value => value.Chapter).ToList();
+            last = reportedLast;
+            AddChapters(root, name, url, selected);
+            Log($"MangaFire: received chapter-list page {page} of {last}");
         }
-        finally { await page.CloseAsync(); }
+        if (selected.Count == 0)
+            throw new InvalidDataException($"MangaFire has no chapters in language '{options.Language}'. Use --language CODE.");
+        return selected.Values.Select(value => value.Chapter).ToList();
     }
 
     internal void AddChapters(JsonElement root, string name, string url, Dictionary<string, (Chapter Chapter, bool Official)> selected)
@@ -149,18 +112,12 @@ internal sealed class MangaFireSite(Options options) : IMangaSite
         return decimal.Parse(number, CultureInfo.InvariantCulture).ToString("0.############################", CultureInfo.InvariantCulture);
     }
 
-    private async Task<(Chapter Chapter, List<string> Images)> ReadChapter(string url, CancellationToken ct)
+    private async Task<(Chapter Chapter, List<string> Images)> ReadChapter(Client client, string url, CancellationToken ct)
     {
         var (_, id) = ParseUrl(url);
         if (id == null) throw new ArgumentException("--chapter requires a MangaFire chapter URL.");
-        var page = await (await Context(ct)).NewPageAsync().WaitAsync(ct);
-        try
-        {
-            using var response = await Response(page, $"/api/chapters/{id}",
-                async () => { await page.GotoAsync(url, new() { WaitUntil = WaitUntilState.DOMContentLoaded }); }, ct);
-            return ParseChapter(response.RootElement, url);
-        }
-        finally { await page.CloseAsync(); }
+        using var response = await Api(client, url, $"/chapters/{id}", [], ct);
+        return ParseChapter(response.RootElement, url);
     }
 
     internal static (Chapter Chapter, List<string> Images) ParseChapter(JsonElement root, string url)
@@ -176,18 +133,18 @@ internal sealed class MangaFireSite(Options options) : IMangaSite
 
     public async Task<Chapter> GetChapter(Client client, string url, CancellationToken ct)
     {
-        var result = await ReadChapter(url, ct);
+        var result = await ReadChapter(client, url, ct);
         prefetched[url] = result.Images;
         return result.Chapter;
     }
 
     public async Task<List<string>> GetImages(Client client, string url, CancellationToken ct) =>
-        prefetched.TryRemove(url, out var images) ? images : (await ReadChapter(url, ct)).Images;
+        prefetched.TryRemove(url, out var images) ? images : (await ReadChapter(client, url, ct)).Images;
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        if (browser != null) await browser.CloseAsync();
-        playwright?.Dispose();
+        signer?.Dispose();
         initialize.Dispose();
+        return ValueTask.CompletedTask;
     }
 }

@@ -5,6 +5,7 @@
 - Prioritize readability over compactness
 - Write in english
 - Use libraries ready for free opensource distribution without paid license
+- Preserve bin and .exe buildability.
 
 ## README
 - allways include build commands for linux and windows

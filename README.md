@@ -22,6 +22,32 @@ bash scripts/build-linux.sh
 
 Release is the default. Windows cross-publishing: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1 -Runtime linux-x64` (also `linux-arm64`, `win-arm64`). Outputs are always under `build/csharp/<runtime>/`. Set `-Configuration Debug` on Windows or `CONFIGURATION=Debug` on Linux for a debug build. Linux still requires system glibc libraries and an executable extraction directory for native Skia assets; set `DOTNET_BUNDLE_EXTRACT_BASE_DIR` if needed. Retain the license and notice files beside distributed binaries.
 
+## Debian 13 package
+
+Build on Windows (`py`/`python`) or Linux (`python3`) with Python 3.10+ and the .NET 10 SDK:
+
+```sh
+python scripts/build-deb.py --runtime linux-x64
+# ARM64: python scripts/build-deb.py --runtime linux-arm64
+```
+
+Output: `build/deb/manga-leech_0.4.0-1~deb13_amd64.deb` (`arm64` for ARM).
+Use `--no-build` to reuse a current complete Linux publish directory, or
+`--version VERSION` to set the package version.
+
+```sh
+sudo apt install ./manga-leech_0.4.0-1~deb13_amd64.deb
+/usr/bin/manga_leech --help
+```
+
+The .NET runtime and application libraries remain included. APT installs only
+system libraries; **Chromium, Playwright, Node.js and Microsoft APT repositories
+are not needed**. The app lives under `/usr/lib/manga-leech` with a launcher at
+`/usr/bin/manga_leech`. Use this explicit path if an old manually installed copy
+in `/usr/local/bin` takes precedence (`type -a manga_leech`). Upgrading removes
+package-owned browser files from old versions; user downloads stay untouched.
+Previously installed system browsers are not removed automatically.
+
 ## Usage
 
 Run directly with the SDK, or substitute the published executable for `dotnet run --project csharp --`:
@@ -42,8 +68,6 @@ dotnet run --project csharp -- "https://mangafire.to/title/52l90-domination" --l
 | `--list` | List selected chapters without downloading images |
 | `--limit N` | First N chapters after sorting; positive integer |
 | `--language CODE` | MangaFire language, language code, e.g. `en` or `pt-br`; default `en` |
-| `--browser-channel NAME` | MangaFire Playwright browser; Windows default `msedge`, other platforms bundled `chromium` |
-| `--browser-headed` | Show the MangaFire browser for troubleshooting or interactive website challenges |
 | `--oldest-first` | Ascending numeric chapter order (default) |
 | `--newest-first` | Descending numeric chapter order |
 | `--workers N` | **8** simultaneous image transfers in total across all chapters |
@@ -62,7 +86,22 @@ Worker counts accept 1â€“1024. `--pdf-tasks-per-child` from Python is unsup
 
 ## Concurrency, cache and PDFs
 
-MangaFire's current `/title/SLUG` application signs API requests in JavaScript. Its adapter runs the actual application in a Playwright browser and reads its chapter/page API responses. Windows uses installed Microsoft Edge by default. To use bundled Chromium instead, build first, run `pwsh csharp/bin/Release/net10.0/playwright.ps1 install chromium`, then pass `--browser-channel chromium` (the default on Linux; `install --with-deps chromium` also installs Linux system dependencies). Published builds also include `playwright.ps1` beside the executable. Browser installation is separate from publishing. Use `--browser-headed` if the site presents an interactive challenge; completion is not guaranteed. WeebCentral and RSS do not launch a browser.
+MangaFire uses the same HTTP client as WeebCentral. Its small signing module is
+fetched once per run and evaluated by Jint inside .NET to sign the API requests.
+No browser, Node process, rendering, advertisements or other site modules run.
+The interpreter has an execution timeout, a 20-million-statement budget, a 128 MB
+allocation limit per operation, cancellation support, and no network/filesystem/CLR
+APIs. This limit is not a cap on the entire application process. Signatures are
+serialized; API and image transfers retain their normal concurrency. If the site
+changes its signing module or requires a browser challenge, the request fails
+with an error; a browser is never launched as a fallback. The old `--browser-*`
+options have been removed.
+
+For low-powered machines, reduce download/PDF concurrency:
+
+```sh
+manga_leech "https://mangafire.to/title/1no2v-i-became-the-chef-of-the-dragon-king" --chapter-workers 1 --pdf-workers 1 --workers 2 --delete-image-cache
+```
 
 MangaFire visits every chapter-list page, filters the chosen language, and keeps one release per chapter number, preferring an official release when available. This avoids duplicate PDF filenames. `--chapter` accepts current `/title/SLUG/chapter/ID` links. Older `/manga/` and `/read/` URLs are not supported. The common sorting and `--limit` are applied after discovery.
 
@@ -76,7 +115,7 @@ JPEG streams and compatible opaque, non-interlaced PNG streams are embedded unch
 
 ## Development
 
-`csharp/` separates CLI/options, parsing, HTTP retries, image cache, bounded download pipeline and PDF writing. `csharp/Sites/IMangaSite.cs` defines chapter discovery, single-chapter metadata, image discovery and disposal. Each site has its own adapter (`WeebCentralSite`, `MangaFireSite`); register additional adapters in `SiteRegistry`. `Application` handles common sorting and limits, and `DownloadPipeline` handles cache, downloads and PDF creation. `Client` only handles HTTP transfers. `tests/MangaLeech.Tests/` contains a regression runner with a local HTTP server; tests need loopback networking and do not contact live manga sites.
+`csharp/` separates CLI/options, parsing, HTTP retries, image cache, bounded download pipeline and PDF writing. `csharp/Sites/IMangaSite.cs` defines chapter discovery, single-chapter metadata, image discovery and disposal. Each site has its own adapter (`WeebCentralSite`, `MangaFireSite`); register additional adapters in `SiteRegistry`. `Application` handles common sorting and limits, and `DownloadPipeline` handles cache, downloads and PDF creation. `Client` only handles HTTP transfers. `tests/MangaLeech.Tests/` contains a regression runner with a local HTTP server and signing sandbox fixtures; tests need loopback networking and do not contact live manga sites.
 
 ```sh
 dotnet build csharp/MangaLeech.csproj -c Release
@@ -89,4 +128,6 @@ After publishing, also test native decoding through the Windows executable:
 dotnet run --project tests/MangaLeech.Tests -c Release -- --published build/csharp/win-x64/manga_leech.exe
 ```
 
-Dependencies: HtmlAgilityPack and SkiaSharp (MIT), Microsoft.Playwright (Apache-2.0); no paid license is needed for Release builds. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). `docs/PROJECT_REVIEW.md` describes the historical Python implementation.
+Dependencies: HtmlAgilityPack and SkiaSharp (MIT), Jint (BSD-2-Clause), Acornima (BSD-3-Clause); no paid license is needed for Release builds. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). `docs/PROJECT_REVIEW.md` describes the historical Python implementation.
+
+Packaging checks: `python -m unittest discover -s tests/Packaging.Tests`.
