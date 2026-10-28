@@ -17,7 +17,17 @@ case "$(uname -m)" in
     *) echo 'Supported architectures: x86_64 and aarch64.' >&2; exit 1 ;;
 esac
 
+mkdir -p build/csharp
+case "${SELF_CONTAINED:-false}" in
+    true|false) ;;
+    *) echo 'SELF_CONTAINED must be true or false.' >&2; exit 1 ;;
+esac
+staging=$(mktemp -d "build/csharp/$runtime-staging.XXXXXX")
+trap 'rm -rf "$staging"' EXIT
 dotnet publish csharp/MangaLeech.csproj --configuration "${CONFIGURATION:-Release}" \
-    --runtime "$runtime" --self-contained true --output "build/csharp/$runtime" \
+    --runtime "$runtime" --self-contained "${SELF_CONTAINED:-false}" --output "$staging" \
     -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true \
     -p:DebugType=None -p:DebugSymbols=false
+rm -f "$staging/libSkiaSharp.pdb"
+rm -rf "build/csharp/$runtime"
+mv "$staging" "build/csharp/$runtime"

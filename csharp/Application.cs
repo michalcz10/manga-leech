@@ -29,13 +29,15 @@ internal static class Application
             else
             {
                 chapters = await site.GetChapters(client, url, cancel.Token);
-                var comparer = Comparer<Chapter>.Create((a, b) => o.Newest ? CompareChapters(b, a) : CompareChapters(a, b));
-                chapters = chapters.OrderBy(ch => ch, comparer).ToList();
-                Log($"Source contains {chapters.Count} chapters.");
+                var comparer = Comparer<ChapterSortKey>.Create((a, b) => o.Newest ? CompareSortKeys(b, a) : CompareSortKeys(a, b));
+                chapters = chapters.Select(ch => (Chapter: ch, Key: SortKey(ch.Title)))
+                    .OrderBy(item => item.Key, comparer).Select(item => item.Chapter).ToList();
             }
 
             if (o.Limit.HasValue)
                 chapters = chapters.Take(o.Limit.Value).ToList();
+            if (o.Chapter == null)
+                Log($"Selected {chapters.Count} chapters.");
             if (o.List)
             {
                 foreach (var ch in chapters)

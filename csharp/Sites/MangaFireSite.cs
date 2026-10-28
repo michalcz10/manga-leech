@@ -49,7 +49,7 @@ internal sealed class MangaFireSite(Options options) : IMangaSite
         {
             using var response = await Api(client, url, $"/titles/{titleId}/chapters", new()
             {
-                ["language"] = options.Language, ["sort"] = "number", ["order"] = "asc",
+                ["language"] = options.Language, ["sort"] = "number", ["order"] = options.Newest ? "desc" : "asc",
                 ["limit"] = "100", ["page"] = number.ToString(CultureInfo.InvariantCulture)
             }, ct);
             var root = response.RootElement;
@@ -60,6 +60,10 @@ internal sealed class MangaFireSite(Options options) : IMangaSite
             last = reportedLast;
             AddChapters(root, name, url, selected);
             Log($"MangaFire: received chapter-list page {page} of {last}");
+            // Fetch one extra distinct number so releases of the last selected
+            // chapter on the following page can still replace it as official.
+            if (options.Limit is int limit && selected.Count > limit)
+                break;
         }
         if (selected.Count == 0)
             throw new InvalidDataException($"MangaFire has no chapters in language '{options.Language}'. Use --language CODE.");
@@ -68,6 +72,7 @@ internal sealed class MangaFireSite(Options options) : IMangaSite
 
     internal void AddChapters(JsonElement root, string name, string url, Dictionary<string, (Chapter Chapter, bool Official)> selected)
     {
+        string slug = ParseUrl(url).Slug;
         foreach (var item in root.GetProperty("items").EnumerateArray())
         {
             if (item.GetProperty("language").GetString() != options.Language) continue;
@@ -75,7 +80,7 @@ internal sealed class MangaFireSite(Options options) : IMangaSite
             string id = item.GetProperty("id").ToString();
             if (!Regex.IsMatch(id, @"^[\w-]+$")) throw new InvalidDataException("Invalid MangaFire chapter ID.");
             bool official = item.TryGetProperty("type", out var type) && type.GetString() == "official";
-            var chapter = new Chapter($"{name} Chapter {number}", SameHost($"/title/{ParseUrl(url).Slug}/chapter/{id}", url));
+            var chapter = new Chapter($"{name} Chapter {number}", SameHost($"/title/{slug}/chapter/{id}", url));
             // Multiple releases of a number would otherwise collide as PDF names.
             if (!selected.TryGetValue(number, out var existing) || (official && !existing.Official))
                 selected[number] = (chapter, official);

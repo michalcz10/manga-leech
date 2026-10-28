@@ -4,7 +4,7 @@ C# / .NET 10 CLI for downloading a WeebCentral or MangaFire series, RSS/Atom fee
 
 ## Build
 
-Install the .NET 10 SDK. Run commands from the repository root; the first build needs internet access for NuGet. Published binaries include the .NET runtime and native image decoder.
+Install the .NET 10 SDK to build. Run commands from the repository root; the first build needs internet access for NuGet. Published binaries are framework-dependent: they include the native image decoder but require a system .NET 10 runtime. Keep the generated files together when distributing a build.
 
 Windows / PowerShell:
 
@@ -20,33 +20,27 @@ bash scripts/build-linux.sh
 ./build/csharp/linux-$(uname -m | sed -e 's/x86_64/x64/' -e 's/aarch64/arm64/')/manga_leech --help
 ```
 
-Release is the default. Windows cross-publishing: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1 -Runtime linux-x64` (also `linux-arm64`, `win-arm64`). Outputs are always under `build/csharp/<runtime>/`. Set `-Configuration Debug` on Windows or `CONFIGURATION=Debug` on Linux for a debug build. Linux still requires system glibc libraries and an executable extraction directory for native Skia assets; set `DOTNET_BUNDLE_EXTRACT_BASE_DIR` if needed. Retain the license and notice files beside distributed binaries.
+Release and a framework-dependent build are the defaults. Windows cross-publishing: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1 -Runtime linux-x64` (also `linux-arm64`, `win-arm64`). Outputs are always under `build/csharp/<runtime>/`; each build replaces the previous output for that runtime. Use `-SelfContained` on Windows or `SELF_CONTAINED=true` on Linux only when a bundled runtime is needed. Set `-Configuration Debug` on Windows or `CONFIGURATION=Debug` on Linux for a debug build. Linux still requires system glibc libraries and an executable extraction directory for native Skia assets; set `DOTNET_BUNDLE_EXTRACT_BASE_DIR` if needed. Retain the license and notice files beside distributed binaries.
 
-## Debian 13 package
+## Install the .NET 10 runtime
 
-Build on Windows (`py`/`python`) or Linux (`python3`) with Python 3.10+ and the .NET 10 SDK:
+Only the runtime is needed to run a published build. The SDK already includes it. On Debian 13 (x64 or ARM64), use the Microsoft package repository and install the ASP.NET Core runtime, which includes the required .NET runtime:
 
-```sh
-python scripts/build-deb.py --runtime linux-x64
-# ARM64: python scripts/build-deb.py --runtime linux-arm64
+```bash
+wget https://packages.microsoft.com/config/debian/13/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+sudo dpkg -i packages-microsoft-prod.deb
+rm packages-microsoft-prod.deb
+sudo apt-get update
+sudo apt-get install -y aspnetcore-runtime-10.0
 ```
 
-Output: `build/deb/manga-leech_0.4.0-1~deb13_amd64.deb` (`arm64` for ARM).
-Use `--no-build` to reuse a current complete Linux publish directory, or
-`--version VERSION` to set the package version.
+On Windows, open PowerShell and install the smaller .NET runtime with Windows Package Manager:
 
-```sh
-sudo apt install ./manga-leech_0.4.0-1~deb13_amd64.deb
-/usr/bin/manga_leech --help
+```powershell
+winget install Microsoft.DotNet.Runtime.10
 ```
 
-The .NET runtime and application libraries remain included. APT installs only
-system libraries; **Chromium, Playwright, Node.js and Microsoft APT repositories
-are not needed**. The app lives under `/usr/lib/manga-leech` with a launcher at
-`/usr/bin/manga_leech`. Use this explicit path if an old manually installed copy
-in `/usr/local/bin` takes precedence (`type -a manga_leech`). Upgrading removes
-package-owned browser files from old versions; user downloads stay untouched.
-Previously installed system browsers are not removed automatically.
+Alternatively, download the .NET 10 Runtime installer for the matching architecture from [Microsoft](https://dotnet.microsoft.com/download/dotnet/10.0). Verify with `dotnet --list-runtimes`; `Microsoft.NETCore.App 10.x` must be listed. The Debian command and Windows package names follow the [Debian](https://learn.microsoft.com/en-us/dotnet/core/install/linux-debian) and [Windows](https://learn.microsoft.com/en-us/dotnet/core/install/windows) installation guides. No browser, Node.js or Playwright is required.
 
 ## Usage
 
@@ -71,8 +65,9 @@ dotnet run --project csharp -- "https://mangafire.to/title/52l90-domination" --l
 | `--oldest-first` | Ascending numeric chapter order (default) |
 | `--newest-first` | Descending numeric chapter order |
 | `--workers N` | **8** simultaneous image transfers in total across all chapters |
-| `--chapter-workers N` | **3** chapters downloading concurrently; `1` restores sequential chapters |
-| `--pdf-workers N` | **4** PDF workers using threads |
+| `--chapter-workers N` | **2** chapters downloading concurrently; `1` restores sequential chapters |
+| `--pdf-workers N` | **2** PDF workers using threads |
+| `--memory-limit-mib N` | **512 MiB** shared limit for large image working buffers; increase for exceptionally large pages |
 | `--delay SECONDS` | Delay before each request per worker: `0.5`; not a global request rate |
 | `--timeout SECONDS` | Total time per transfer attempt: `60` |
 | `--user-agent VALUE` | `MangaLeech.CSharp/0.2` |
@@ -99,12 +94,12 @@ signer must be updated; there is no interpreter or browser fallback. The old
 For low-powered machines, reduce download/PDF concurrency:
 
 ```sh
-manga_leech "https://mangafire.to/title/1no2v-i-became-the-chef-of-the-dragon-king" --chapter-workers 1 --pdf-workers 1 --workers 2 --delete-image-cache
+manga_leech "https://mangafire.to/title/1no2v-i-became-the-chef-of-the-dragon-king" --chapter-workers 1 --pdf-workers 1 --workers 2 --memory-limit-mib 256 --delete-image-cache
 ```
 
-MangaFire visits every chapter-list page, filters the chosen language, and keeps one release per chapter number, preferring an official release when available. This avoids duplicate PDF filenames. `--chapter` accepts current `/title/SLUG/chapter/ID` links. Older `/manga/` and `/read/` URLs are not supported. The common sorting and `--limit` are applied after discovery.
+MangaFire filters the chosen language and keeps one release per chapter number, preferring an official release when available. With `--limit`, discovery stops after enough sorted chapter numbers are available, including one extra number to settle releases at the boundary. This avoids unnecessary API pages and duplicate PDF filenames. `--chapter` accepts current `/title/SLUG/chapter/ID` links. Older `/manga/` and `/read/` URLs are not supported.
 
-Three chapter downloads share eight image slots. Completed chapters enter a bounded queue of at most twice `--pdf-workers`; four PDF workers drain it while downloading continues. Sorting determines selection and scheduling, while chapters may finish in a different order. The image limit stays global as the chapter count increases. This allows requests to overlap across chapters; actual throughput depends on the server. HTTP 429/503 pauses new requests to the same host using `Retry-After` (maximum 120 seconds); each transfer has at most three attempts. The application does not handle CAPTCHA or login.
+Two chapter downloads share eight image slots. Completed chapters enter a bounded queue of at most twice `--pdf-workers`; two PDF workers drain it while downloading continues. Validation and PDF conversion share the image working-memory budget. Sorting determines selection and scheduling, while chapters may finish in a different order. The image limit stays global as the chapter count increases. This allows requests to overlap across chapters; actual throughput depends on the server. HTTP 429/503 pauses new requests to the same host using `Retry-After` (maximum 120 seconds); each transfer has at most three attempts. The application does not handle CAPTCHA or login.
 
 Images live under `downloads/.images/` with SHA-256 verification receipts. Downloads and PDFs use temporary `.part` files and are published only after success. Exit codes: `0` success, `1` failure, `130` Ctrl+C. Failure of one chapter does not stop others. Ctrl+C cancels queued/network work and waits for active PDF operations to observe cancellation; native image decoding/compression can delay that briefly. Running two instances into the same output directory is unsupported.
 
@@ -121,6 +116,8 @@ dotnet build csharp/MangaLeech.csproj -c Release
 dotnet run --project tests/MangaLeech.Tests -c Release
 ```
 
+To measure validation plus PDF creation without network access, run `dotnet run --project tests/MangaLeech.Tests -c Release -- --benchmark IMAGE1 IMAGE2 ...` with representative local pages, or use `--benchmark --synthetic` for a repeatable 2048 × 3072 sample. It reports elapsed time, CPU time, peak process working set and managed allocations. Use images from the same series for real comparisons; the benchmark removes its temporary PDF afterward.
+
 After publishing, also test native decoding through the Windows executable:
 
 ```powershell
@@ -128,5 +125,3 @@ dotnet run --project tests/MangaLeech.Tests -c Release -- --published build/csha
 ```
 
 Dependencies: HtmlAgilityPack and SkiaSharp (MIT); no paid license is needed for Release builds. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). `docs/PROJECT_REVIEW.md` describes the historical Python implementation.
-
-Packaging checks: `python -m unittest discover -s tests/Packaging.Tests`.

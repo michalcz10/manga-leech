@@ -6,7 +6,7 @@ internal static class PngFixture
 {
     // Construct tiny PNGs independently of Skia's encoder so low-bit and 16-bit
     // preservation tests do not accidentally exercise only its 8-bit output.
-    internal static byte[] Make(byte bits, byte color, byte[] row, byte[]? palette = null)
+    internal static byte[] Make(byte bits, byte color, byte[] row, byte[]? palette = null, bool splitIdat = false)
     {
         using var output = new MemoryStream();
         output.Write(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 });
@@ -23,7 +23,14 @@ internal static class PngFixture
             compression.WriteByte(0);
             compression.Write(row);
         }
-        Chunk(output, "IDAT", pixels.ToArray());
+        byte[] compressed = pixels.ToArray();
+        if (splitIdat)
+        {
+            int middle = compressed.Length / 2;
+            Chunk(output, "IDAT", compressed[..middle]);
+            Chunk(output, "IDAT", compressed[middle..]);
+        }
+        else Chunk(output, "IDAT", compressed);
         Chunk(output, "IEND", []);
         return output.ToArray();
     }

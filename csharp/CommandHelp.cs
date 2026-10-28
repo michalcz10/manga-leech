@@ -14,8 +14,9 @@ internal static class CommandHelp
           --oldest-first         Ascending chapter number (default)
           --newest-first         Descending chapter number
           --workers N            Global concurrent image downloads (8)
-          --chapter-workers N    Concurrent chapters downloading images (3)
-          --pdf-workers N        Concurrent PDF workers (4)
+          --chapter-workers N    Concurrent chapters downloading images (2)
+          --pdf-workers N        Concurrent PDF workers (2)
+          --memory-limit-mib N   Shared image working-memory budget (512 MiB)
           --timeout SECONDS      Total timeout per transfer attempt (60)
           --delay SECONDS        Delay before each request, per worker (0.5)
           --user-agent VALUE     HTTP User-Agent (MangaLeech.CSharp/0.2)

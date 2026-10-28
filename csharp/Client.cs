@@ -38,7 +38,7 @@ sealed class Client : IDisposable
         }
     }
 
-    public async Task Transfer(string url, string? referer, Stream target, CancellationToken ct)
+    public async Task<string?> Transfer(string url, string? referer, Stream target, CancellationToken ct, bool calculateHash = false)
     {
         string host = new Uri(HttpUrl(url)).Authority;
         for (int attempt = 0; attempt < 3; attempt++)
@@ -81,10 +81,24 @@ sealed class Client : IDisposable
                 }
 
                 await using var source = await response.Content.ReadAsStreamAsync(timeout.Token);
-                await source.CopyToAsync(target, timeout.Token);
+                using var hash = calculateHash ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256) : null;
+                byte[] buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(81920);
+                try
+                {
+                    int read;
+                    while ((read = await source.ReadAsync(buffer, timeout.Token)) > 0)
+                    {
+                        await target.WriteAsync(buffer.AsMemory(0, read), timeout.Token);
+                        hash?.AppendData(buffer, 0, read);
+                    }
+                }
+                finally
+                {
+                    System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+                }
                 if (response.Content.Headers.ContentLength is long expected && target.Position != expected)
                     throw new IOException("Incomplete response: Content-Length mismatch.");
-                return;
+                return hash == null ? null : Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
             }
             catch (Exception e) when ((e is HttpRequestException h && h.StatusCode == null) || e is IOException || (e is OperationCanceledException && !ct.IsCancellationRequested))
             {

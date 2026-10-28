@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using MangaLeech.Core;
 
 internal sealed class LocalServer : IAsyncDisposable
 {
@@ -10,10 +11,12 @@ internal sealed class LocalServer : IAsyncDisposable
     private readonly ConcurrentBag<Task> requests = new();
     private readonly Task accepting;
     private int activeImages;
+    private int connections;
     private readonly Dictionary<string, int> activeChapters = [];
     private readonly object gate = new();
     public ConcurrentDictionary<string, int> Hits { get; } = new();
     public int MaxImages { get; private set; }
+    public int Connections => Volatile.Read(ref connections);
     public int MaxChapters { get; private set; }
     public bool WrongReferer { get; private set; }
     public bool FailChapter { get; set; }
@@ -47,6 +50,7 @@ internal sealed class LocalServer : IAsyncDisposable
             while (!stop.IsCancellationRequested)
             {
                 var client = await listener.AcceptTcpClientAsync(stop.Token);
+                Interlocked.Increment(ref connections);
                 requests.Add(Respond(client));
             }
         }
@@ -61,6 +65,8 @@ internal sealed class LocalServer : IAsyncDisposable
             {
                 using var stream = client.GetStream();
                 using var reader = new StreamReader(stream, leaveOpen: true);
+                while (!stop.IsCancellationRequested)
+                {
                 string? request = await reader.ReadLineAsync(stop.Token);
                 if (request == null) return;
                 string path = request.Split(' ')[1];
@@ -84,7 +90,9 @@ internal sealed class LocalServer : IAsyncDisposable
                     string canonical = string.Join("&", parameters.Where(pair => pair.Key != "vrf")
                         .OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => pair.Key + "=" + pair.Value));
                     string signedInput = apiPath + (canonical.Length == 0 ? "" : "?" + canonical);
-                    if (!MangaSignatures.TryGetValue(signedInput, out string? signature) ||
+                    string? signature = MangaSignatures.TryGetValue(signedInput, out string? known) ? known
+                        : apiPath.StartsWith("/titles/limit", StringComparison.Ordinal) ? MangaFireSigner.Sign(apiPath, parameters.Where(pair => pair.Key != "vrf").ToDictionary()) : null;
+                    if (signature == null ||
                         !parameters.TryGetValue("vrf", out string? supplied) || supplied != signature)
                     {
                         status = 403;
@@ -92,6 +100,22 @@ internal sealed class LocalServer : IAsyncDisposable
                     }
                     else if (apiPath == "/titles/fixture")
                         body = Encoding.UTF8.GetBytes("{\"data\":{\"title\":\"HTTP Series\"}}");
+                    else if (apiPath == "/titles/limit")
+                        body = Encoding.UTF8.GetBytes("{\"data\":{\"title\":\"Limit Series\"}}");
+                    else if (apiPath == "/titles/limit/chapters")
+                    {
+                        bool newest = parameters.TryGetValue("order", out string? order) && order == "desc";
+                        string items = page switch
+                        {
+                            "1" when newest => "{\"id\":4,\"number\":4,\"language\":\"en\",\"type\":\"official\"},{\"id\":3,\"number\":3,\"language\":\"en\",\"type\":\"official\"}",
+                            "1" => "{\"id\":1,\"number\":1,\"language\":\"en\",\"type\":\"official\"},{\"id\":2,\"number\":2,\"language\":\"en\",\"type\":\"official\"}",
+                            "2" when newest => "{\"id\":2,\"number\":2,\"language\":\"en\",\"type\":\"official\"}",
+                            "2" => "{\"id\":3,\"number\":3,\"language\":\"en\",\"type\":\"official\"}",
+                            _ when newest => "{\"id\":1,\"number\":1,\"language\":\"en\",\"type\":\"official\"}",
+                            _ => "{\"id\":4,\"number\":4,\"language\":\"en\",\"type\":\"official\"}"
+                        };
+                        body = Encoding.UTF8.GetBytes($"{{\"items\":[{items}],\"meta\":{{\"page\":{page},\"lastPage\":3}}}}");
+                    }
                     else if (apiPath == "/titles/fixture/chapters")
                     {
                         string items = page == "1"
@@ -164,9 +188,11 @@ internal sealed class LocalServer : IAsyncDisposable
                 {
                     body = Encoding.UTF8.GetBytes("ok");
                 }
-                byte[] response = Encoding.ASCII.GetBytes($"HTTP/1.1 {status} Test\r\nContent-Length: {body.Length}\r\nConnection: close\r\n{extra}\r\n");
+                byte[] response = Encoding.ASCII.GetBytes($"HTTP/1.1 {status} Test\r\nContent-Length: {body.Length}\r\nConnection: keep-alive\r\n{extra}\r\n");
                 await stream.WriteAsync(response, stop.Token);
                 await stream.WriteAsync(body, stop.Token);
+                if (headers.TryGetValue("Connection", out string? connection) && connection.Equals("close", StringComparison.OrdinalIgnoreCase)) return;
+                }
             }
             catch (Exception exception) when (exception is IOException or OperationCanceledException or SocketException) { }
         }

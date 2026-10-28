@@ -30,21 +30,31 @@ internal static class ChapterParser
         return $"{Clean(series)} - {kind} {index}";
     }
 
-    internal static int CompareChapters(Chapter a, Chapter b)
+    internal readonly record struct ChapterSortKey(bool HasNumber, BigInteger Whole, string Fraction);
+    internal static ChapterSortKey SortKey(string title)
     {
-        var ma = LastLabel(a.Title);
-        var mb = LastLabel(b.Title);
-        if (ma == null || mb == null)
-            return ma == null ? (mb == null ? 0 : 1) : -1;
-        var x = ma.Groups[1].Value.Split('.');
-        var y = mb.Groups[1].Value.Split('.');
-        int c = BigInteger.Parse(x[0]).CompareTo(BigInteger.Parse(y[0]));
+        var match = LastLabel(title);
+        if (match == null) return new(false, BigInteger.Zero, "");
+        var parts = match.Groups[1].Value.Split('.');
+        return new(true, BigInteger.Parse(parts[0], CultureInfo.InvariantCulture), parts.Length > 1 ? parts[1] : "");
+    }
+    internal static int CompareSortKeys(ChapterSortKey x, ChapterSortKey y)
+    {
+        if (!x.HasNumber || !y.HasNumber)
+            return x.HasNumber == y.HasNumber ? 0 : x.HasNumber ? -1 : 1;
+        int c = x.Whole.CompareTo(y.Whole);
         if (c != 0)
             return c;
-        string xf = x.Length > 1 ? x[1] : "", yf = y.Length > 1 ? y[1] : "";
-        int n = Math.Max(xf.Length, yf.Length);
-        return string.CompareOrdinal(xf.PadRight(n, '0'), yf.PadRight(n, '0'));
+        int n = Math.Max(x.Fraction.Length, y.Fraction.Length);
+        for (int i = 0; i < n; i++)
+        {
+            char a = i < x.Fraction.Length ? x.Fraction[i] : '0';
+            char b = i < y.Fraction.Length ? y.Fraction[i] : '0';
+            if (a != b) return a.CompareTo(b);
+        }
+        return 0;
     }
+    internal static int CompareChapters(Chapter a, Chapter b) => CompareSortKeys(SortKey(a.Title), SortKey(b.Title));
 
     internal static List<Chapter> Feed(byte[] data, string basis)
     {

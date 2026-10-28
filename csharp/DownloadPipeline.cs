@@ -5,7 +5,7 @@ namespace MangaLeech.Core;
 internal static class DownloadPipeline
 {
     internal const string PdfVersion = "csharp-skia-lossless-v2";
-    private sealed record PdfJob(Chapter Chapter, string[] Paths, string Output, string Manifest, string Signature);
+    private sealed record PdfJob(Chapter Chapter, string[] Paths, string[] Digests, string Output, string Manifest, string Signature);
     internal static async Task<int> Run(Client client, List<Chapter> chapters, Options options, CancellationToken cancellationToken, IMangaSite? site = null)
     {
         site ??= new WeebCentralSite();
@@ -23,6 +23,7 @@ internal static class DownloadPipeline
 
         int failures = 0;
         using var imageSlots = new SemaphoreSlim(options.Workers);
+        var memory = new MemoryBudget(options.MemoryLimitMiB);
         // Backpressure bounds completed chapters awaiting PDF creation. Chapter workers
         // also wait here, so a fast connection cannot create an unlimited task backlog.
         var queue = Channel.CreateBounded<PdfJob>(new BoundedChannelOptions(options.PdfWorkers * 2) { FullMode = BoundedChannelFullMode.Wait, SingleWriter = false, SingleReader = options.PdfWorkers == 1 });
@@ -32,7 +33,7 @@ internal static class DownloadPipeline
             {
                 try
                 {
-                    PdfWriter.Make(job.Paths, job.Output, job.Chapter.Title, options.JpegQuality, cancellationToken);
+                    PdfWriter.Make(job.Paths, job.Output, job.Chapter.Title, options.JpegQuality, cancellationToken, job.Digests, memory);
                     if (options.Manifest)
                     {
                         AtomicText(job.Manifest, job.Signature);
@@ -83,8 +84,8 @@ internal static class DownloadPipeline
                         return;
                     }
 
-                    var paths = await DownloadImages(client, chapter, urls, options, imageSlots, token);
-                    await queue.Writer.WriteAsync(new PdfJob(chapter, paths, output, manifest, signature), token);
+                    var (paths, digests) = await DownloadImages(client, chapter, urls, options, imageSlots, memory, token);
+                    await queue.Writer.WriteAsync(new PdfJob(chapter, paths, digests, output, manifest, signature), token);
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
                 {

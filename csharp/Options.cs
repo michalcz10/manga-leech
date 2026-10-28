@@ -16,8 +16,9 @@ internal sealed class Options
     public bool DeleteImageCache { get; private set; }
     public string Language { get; private set; } = "en";
     public int Workers { get; private set; } = 8;
-    public int PdfWorkers { get; private set; } = 4;
-    public int ChapterWorkers { get; private set; } = 3;
+    public int PdfWorkers { get; private set; } = 2;
+    public int ChapterWorkers { get; private set; } = 2;
+    public int MemoryLimitMiB { get; private set; } = 512;
     public int? Limit { get; private set; }
     public int? JpegQuality { get; private set; }
     public double Timeout { get; private set; } = 60;
@@ -81,6 +82,9 @@ internal sealed class Options
                 case "--pdf-workers":
                     o.PdfWorkers = Integer();
                     break;
+                case "--memory-limit-mib":
+                    o.MemoryLimitMiB = Integer();
+                    break;
                 case "--chapter-workers":
                     o.ChapterWorkers = Integer();
                     break;
@@ -109,7 +113,7 @@ internal sealed class Options
             throw new ArgumentException("Specify a series/feed URL or --chapter URL.");
         if (o.Newest && o.Oldest)
             throw new ArgumentException("Select only one sort direction.");
-        if (!double.IsFinite(o.Timeout) || o.Timeout <= 0 || o.Timeout > (uint.MaxValue - 1) / 1000.0 || !double.IsFinite(o.Delay) || o.Delay < 0 || o.Delay > TimeSpan.MaxValue.TotalSeconds / 2 || o.Workers is < 1 or > 1024 || o.PdfWorkers is < 1 or > 1024 || o.ChapterWorkers is < 1 or > 1024 || o.Limit is <= 0)
+        if (!double.IsFinite(o.Timeout) || o.Timeout <= 0 || o.Timeout > (uint.MaxValue - 1) / 1000.0 || !double.IsFinite(o.Delay) || o.Delay < 0 || o.Delay > TimeSpan.MaxValue.TotalSeconds / 2 || o.Workers is < 1 or > 1024 || o.PdfWorkers is < 1 or > 1024 || o.ChapterWorkers is < 1 or > 1024 || o.MemoryLimitMiB is < 64 or > 32768 || o.Limit is <= 0)
             throw new ArgumentException("Invalid timeout, delay, workers, chapter-workers, pdf-workers or limit.");
         if (o.JpegQuality is < 1 or > 95)
             throw new ArgumentException("jpeg-quality must be between 1 and 95.");

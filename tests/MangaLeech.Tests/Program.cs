@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Compression;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Text.Json;
@@ -6,6 +7,9 @@ using System.Xml.Linq;
 using MangaLeech.Core;
 using SkiaSharp;
 using static MangaLeech.Core.ChapterParser;
+
+if (args.Length >= 2 && args[0] == "--benchmark")
+    return Benchmark.Run(args[1..]);
 
 var tests = new (string Name, Func<Task> Run)[]
 {
@@ -17,6 +21,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("PDF streams, transparency, page order, XMP and xref", TestPdf),
     ("Strict image validation and cache repair", TestValidation),
     ("PNG palette and bit depth preservation", TestPng),
+    ("Large images and shared memory budget", TestLargeImages),
+    ("Memory budget waits atomically and cancels", TestMemoryBudget),
     ("Parallel chapters, global image limit, manifests and rebuild", TestPipeline),
     ("Sequential chapters and successful cache cleanup", TestSequential),
     ("Chapter failures preserve successful output", TestFailure),
@@ -77,14 +83,15 @@ static List<Chapter> Chapters(LocalServer server, int count = 6) =>
 static Task TestOptions()
 {
     var options = Options.Parse(["https://example.test/rss"]);
-    Check(options.Workers == 8 && options.PdfWorkers == 4 && options.ChapterWorkers == 3, "Incorrect defaults.");
-    foreach (string argument in new[] { "--workers", "--pdf-workers", "--chapter-workers", "--limit" })
+    Check(options.Workers == 8 && options.PdfWorkers == 2 && options.ChapterWorkers == 2 && options.MemoryLimitMiB == 512, "Incorrect defaults.");
+    foreach (string argument in new[] { "--workers", "--pdf-workers", "--chapter-workers", "--limit", "--memory-limit-mib" })
     {
         Throws<ArgumentException>(() => Options.Parse(["https://example.test/rss", argument, "0"]));
     }
     Throws<ArgumentException>(() => Options.Parse(["https://example.test/rss", "--timeout", "NaN"]));
     Throws<ArgumentException>(() => Options.Parse(["https://example.test/rss", "--timeout", "5000000"]));
     Throws<ArgumentException>(() => Options.Parse(["https://example.test/rss", "--jpeg-quality", "96"]));
+    Throws<ArgumentException>(() => Options.Parse(["https://example.test/rss", "--memory-limit-mib", "32769"]));
     Throws<ArgumentException>(() => Options.Parse(["https://example.test/rss", "--chapter", "https://example.test/chapter"]));
     Throws<ArgumentException>(() => Options.Parse(["https://example.test/rss", "--oldest-first", "--newest-first"]));
     return Task.CompletedTask;
@@ -160,6 +167,7 @@ static async Task TestMangaFireHttp()
     await using var site = new MangaFireSite(options);
     string url = server.Url + "/title/fixture-series";
     var chapters = await site.GetChapters(client, url, CancellationToken.None);
+    Check(server.Connections == 1, "Sequential API requests did not reuse their HTTP connection.");
     Check(chapters.Count == 2 && chapters[0].Url.EndsWith("/chapter/2"), "HTTP paging or official release selection failed.");
     Check(chapters[1].Title == "HTTP Series Chapter 2.5", "HTTP metadata failed.");
     var direct = await site.GetChapter(client, chapters[0].Url, CancellationToken.None);
@@ -169,6 +177,17 @@ static async Task TestMangaFireHttp()
     var results = await Task.WhenAll(chapters.Select(chapter => site.GetImages(client, chapter.Url, CancellationToken.None)));
     Check(results.All(images => images.Single() == server.Url + "/image/1/1"), "Concurrent signing failed.");
     Check(server.Hits.Keys.All(path => path.StartsWith("/api/")), "Native signing fetched HTML or JavaScript.");
+    var oldestOptions = Settings(scratch.Path, "--limit", "1");
+    using var oldestClient = new Client(oldestOptions);
+    await using var oldestSite = new MangaFireSite(oldestOptions);
+    var oldest = await oldestSite.GetChapters(oldestClient, server.Url + "/title/limit-demo", CancellationToken.None);
+    Check(oldest.Count == 2 && oldest.Any(ch => ch.Title.EndsWith("Chapter 1")), "Ascending limit boundary failed.");
+    var newestOptions = Settings(scratch.Path, "--limit", "1", "--newest-first");
+    using var newestClient = new Client(newestOptions);
+    await using var newestSite = new MangaFireSite(newestOptions);
+    var newest = await newestSite.GetChapters(newestClient, server.Url + "/title/limit-demo", CancellationToken.None);
+    Check(newest.Count == 2 && newest.Any(ch => ch.Title.EndsWith("Chapter 4")), "Descending limit boundary failed.");
+    Check(!server.Hits.Keys.Any(path => path.StartsWith("/api/titles/limit/chapters") && path.Contains("page=2")), "Limit still fetched unneeded pages.");
 }
 
 static Task TestMangaFireSigner()
@@ -223,6 +242,17 @@ static Task TestPdf()
     Check(output.AsSpan().IndexOf(bytes[0]) >= 0, "Original JPEG bytes were changed.");
     Check(Regex.Matches(text, "/Filter /DCTDecode").Count >= 1, "Missing JPEG stream.");
     Check(text.Contains("/SMask") && text.Contains("/Count 4"), "Transparency or duplicate pages lost.");
+    var rgbStream = Regex.Match(text, @"/BitsPerComponent 8 /ColorSpace /DeviceRGB /Filter /FlateDecode(?: /SMask \d+ 0 R)? /Length (\d+) >>\nstream\n");
+    Check(rgbStream.Success, "Transparent image RGB stream is missing.");
+    using (var compressed = new MemoryStream(output, rgbStream.Index + rgbStream.Length, int.Parse(rgbStream.Groups[1].Value)))
+    using (var inflater = new ZLibStream(compressed, CompressionMode.Decompress))
+    using (var original = ImageCache.DecodeImage(paths[1]))
+    {
+        Span<byte> pixel = stackalloc byte[3];
+        inflater.ReadExactly(pixel);
+        SKColor expected = original.GetPixel(0, 0);
+        Check(pixel[0] == expected.Red && pixel[1] == expected.Green && pixel[2] == expected.Blue, "Decoded RGB channels changed in the PDF.");
+    }
     var boxes = Regex.Matches(text, @"/MediaBox \[0 0 ([\d.]+) ([\d.]+)\]");
     Check(boxes.Count == 4 && boxes[1].Groups[1].Value == "3" && boxes[1].Groups[2].Value == "9", "Page order or aspect ratio changed.");
     int xmlStart = text.IndexOf("<x:xmpmeta", StringComparison.Ordinal);
@@ -251,6 +281,8 @@ static Task TestValidation()
     Check(!ImageCache.ValidImage(path), "Truncated JPEG accepted by cached receipt.");
     File.WriteAllBytes(path, ImageBytes(SKEncodedImageFormat.Webp));
     Check(ImageCache.ValidImage(path), "WebP validation failed.");
+    using var budget = new MemoryBudget(64).Acquire(32L * 1024 * 1024, CancellationToken.None);
+    Throws<MemoryBudgetExceededException>(() => new MemoryBudget(64).Acquire(80L * 1024 * 1024, CancellationToken.None));
     return Task.CompletedTask;
 }
 
@@ -259,7 +291,7 @@ static Task TestPng()
     using var scratch = new Scratch();
     var cases = new[]
     {
-        (Data: PngFixture.Make(1, 0, [0x40]), Bits: 1, Palette: false),
+        (Data: PngFixture.Make(1, 0, [0x40], splitIdat: true), Bits: 1, Palette: false),
         (Data: PngFixture.Make(1, 3, [0x40], [255, 0, 0, 0, 255, 0]), Bits: 1, Palette: true),
         (Data: PngFixture.Make(16, 0, [0x12, 0x34, 0xab, 0xcd]), Bits: 16, Palette: false)
     };
@@ -276,6 +308,48 @@ static Task TestPng()
         Check(!content.Contains("/DCTDecode"), "Low-bit/16-bit PNG was converted to JPEG.");
     }
     return Task.CompletedTask;
+}
+
+static Task TestLargeImages()
+{
+    using var scratch = new Scratch();
+    string webp = Path.Combine(scratch.Path, "large.webp");
+    string jpeg = Path.Combine(scratch.Path, "large.jpg");
+    byte[] originalJpeg = ImageBytes(SKEncodedImageFormat.Jpeg, width: 2048, height: 3072);
+    File.WriteAllBytes(webp, ImageBytes(SKEncodedImageFormat.Webp, width: 2048, height: 3072));
+    File.WriteAllBytes(jpeg, originalJpeg);
+    string rejected = Path.Combine(scratch.Path, "rejected.pdf");
+    Throws<MemoryBudgetExceededException>(() => PdfWriter.Make([webp], rejected, "Large Chapter 1", null, CancellationToken.None, budget: new MemoryBudget(64)));
+    Check(!File.Exists(rejected) && !File.Exists(rejected + ".part"), "Memory limit published a partial PDF.");
+    string output = Path.Combine(scratch.Path, "large.pdf");
+    PdfWriter.Make([jpeg, webp], output, "Large Chapter 1", null, CancellationToken.None, budget: new MemoryBudget(256));
+    byte[] pdf = File.ReadAllBytes(output);
+    Check(pdf.AsSpan().IndexOf(originalJpeg) >= 0, "Large JPEG was not embedded unchanged.");
+    Check(Encoding.Latin1.GetString(pdf).Contains("/Count 2"), "Large pages were lost.");
+    return Task.CompletedTask;
+}
+
+static async Task TestMemoryBudget()
+{
+    var budget = new MemoryBudget(64);
+    using var held = budget.Acquire(48L * 1024 * 1024, CancellationToken.None);
+    var pending = Task.Run(() => budget.Acquire(32L * 1024 * 1024, CancellationToken.None));
+    await Task.Delay(50);
+    Check(!pending.IsCompleted, "Memory budget admitted overlapping reservations above its capacity.");
+    held.Dispose();
+    using (await pending.WaitAsync(TimeSpan.FromSeconds(2))) { }
+
+    using var full = budget.Acquire(64L * 1024 * 1024, CancellationToken.None);
+    using var cancel = new CancellationTokenSource();
+    var waiting = Task.Run(() => budget.Acquire(16L * 1024 * 1024, cancel.Token));
+    await Task.Delay(50);
+    cancel.Cancel();
+    try
+    {
+        using var unexpected = await waiting.WaitAsync(TimeSpan.FromSeconds(2));
+        throw new Exception("Cancelled memory reservation was admitted.");
+    }
+    catch (OperationCanceledException) { }
 }
 
 static async Task TestPipeline()
