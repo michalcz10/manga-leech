@@ -65,7 +65,7 @@ dotnet run --project csharp -- "https://mangafire.to/title/52l90-domination" --l
 | `--oldest-first` | Ascending numeric chapter order (default) |
 | `--newest-first` | Descending numeric chapter order |
 | `--workers N` | **8** simultaneous image transfers in total across all chapters |
-| `--chapter-workers N` | **2** chapters downloading concurrently; `1` restores sequential chapters |
+| `--chapter-workers N` | **2** concurrent chapter discovery requests; `1` waits for each chapter's images before starting the next |
 | `--pdf-workers N` | **2** PDF workers using threads |
 | `--memory-limit-mib N` | **512 MiB** shared limit for large image working buffers; increase for exceptionally large pages |
 | `--delay SECONDS` | Delay before each request per worker: `0.5`; not a global request rate |
@@ -99,7 +99,7 @@ manga_leech "https://mangafire.to/title/1no2v-i-became-the-chef-of-the-dragon-ki
 
 MangaFire filters the chosen language and keeps one release per chapter number, preferring an official release when available. With `--limit`, discovery stops after enough sorted chapter numbers are available, including one extra number to settle releases at the boundary. This avoids unnecessary API pages and duplicate PDF filenames. `--chapter` accepts current `/title/SLUG/chapter/ID` links. Older `/manga/` and `/read/` URLs are not supported.
 
-Two chapter downloads share eight image slots. Completed chapters enter a bounded queue of at most twice `--pdf-workers`; two PDF workers drain it while downloading continues. Validation and PDF conversion share the image working-memory budget. Sorting determines selection and scheduling, while chapters may finish in a different order. The image limit stays global as the chapter count increases. This allows requests to overlap across chapters; actual throughput depends on the server. HTTP 429/503 pauses new requests to the same host using `Retry-After` (maximum 120 seconds); each transfer has at most three attempts. The application does not handle CAPTCHA or login.
+Chapter discovery feeds a bounded global image queue with eight workers by default. A slow image keeps one worker busy while other workers can fetch images from later chapters; a chapter enters the bounded PDF queue only after all its images finish. Two PDF workers drain that queue while downloading continues. `--chapter-workers 1` waits for a chapter's images before discovering the next chapter. Validation and PDF conversion share the image working-memory budget. Sorting determines selection and scheduling, while chapters may finish in a different order. HTTP 429/503 pauses new requests to the same host using `Retry-After` (maximum 120 seconds); each transfer has at most three attempts, each with its own `--timeout`. The application does not handle CAPTCHA or login.
 
 Images live under `downloads/.images/` with SHA-256 verification receipts. Downloads and PDFs use temporary `.part` files and are published only after success. Exit codes: `0` success, `1` failure, `130` Ctrl+C. Failure of one chapter does not stop others. Ctrl+C cancels queued/network work and waits for active PDF operations to observe cancellation; native image decoding/compression can delay that briefly. Running two instances into the same output directory is unsupported.
 

@@ -24,6 +24,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Large images and shared memory budget", TestLargeImages),
     ("Memory budget waits atomically and cancels", TestMemoryBudget),
     ("Parallel chapters, global image limit, manifests and rebuild", TestPipeline),
+    ("Slow image retries do not block later chapters", TestSlowTail),
     ("Sequential chapters and successful cache cleanup", TestSequential),
     ("Chapter failures preserve successful output", TestFailure),
     ("PDF failure retains image cache", TestPdfFailure),
@@ -359,7 +360,7 @@ static async Task TestPipeline()
     var options = Settings(scratch.Path, "--workers", "2", "--chapter-workers", "3", "--pdf-workers", "2", "--write-manifest");
     using var client = new Client(options);
     Check(await DownloadPipeline.Run(client, Chapters(server, 12), options, CancellationToken.None) == 0, "Pipeline failed.");
-    Check(server.MaxImages == 2 && server.MaxChapters >= 2 && server.MaxChapters <= 3, "Concurrency budgets were not respected.");
+    Check(server.MaxImages == 2 && server.MaxChapters >= 2, "Image concurrency or chapter overlap was lost.");
     Check(!server.WrongReferer, "Image Referer is wrong.");
     Check(Directory.GetFiles(scratch.Path, "*.pdf").Length == 12, "PDF workers did not drain.");
     Check(Directory.GetFiles(scratch.Path, "*.pages.sha256").Length == 12, "Missing manifests.");
@@ -375,6 +376,18 @@ static async Task TestPipeline()
     int beforeSkip = server.Hits.Values.Sum();
     Check(await DownloadPipeline.Run(client, Chapters(server, 12), options, CancellationToken.None) == 0, "Manifest skip failed.");
     Check(server.Hits.Values.Sum() == beforeSkip + 12, "Manifest skip requested images.");
+}
+
+static async Task TestSlowTail()
+{
+    using var scratch = new Scratch();
+    await using var server = new LocalServer(ImageBytes()) { StallFirstTailImages = true };
+    var options = Settings(scratch.Path, "--workers", "3", "--chapter-workers", "2", "--timeout", "0.1");
+    using var client = new Client(options);
+    Check(await DownloadPipeline.Run(client, Chapters(server, 4), options, CancellationToken.None) == 0, "Timed-out images did not recover.");
+    Check(server.MaxChapters >= 3, "Later chapters waited for slow image retries.");
+    Check(server.Hits["/image/1/3"] >= 2 && server.Hits["/image/2/3"] >= 2, "Slow image fixture did not trigger retries.");
+    Check(Directory.GetFiles(scratch.Path, "*.pdf").Length == 4, "The slow chapters were not completed.");
 }
 
 static async Task TestSequential()

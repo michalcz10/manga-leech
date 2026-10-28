@@ -52,57 +52,39 @@ internal static class ImageCache
         }
     }
 
-    internal static async Task<(string[] Paths, string[] Digests)> DownloadImages(Client client, Chapter chapter, List<string> urls, Options o, SemaphoreSlim imageSlots, MemoryBudget budget, CancellationToken ct)
+    internal static async Task<(string Path, string Digest)> DownloadImage(Client client, Chapter chapter, string url, int index, Options o, MemoryBudget budget, CancellationToken ct)
     {
         string cache = Path.Combine(o.Output, ".images", CacheName(chapter));
         Directory.CreateDirectory(cache);
-        var paths = new string[urls.Count];
-        var digests = new string[urls.Count];
-        int completed = 0;
-        await Parallel.ForEachAsync(Enumerable.Range(0, urls.Count), new ParallelOptions { MaxDegreeOfParallelism = o.Workers, CancellationToken = ct }, async (i, token) =>
+        string path = Path.Combine(cache, $"{index + 1:00000}-{Hash(url)[..12]}.img");
+        try
         {
-            string url = urls[i], path = Path.Combine(cache, $"{i + 1:00000}-{Hash(url)[..12]}.img");
-            try
+            string digest;
+            if (o.Force || !TryGetDigest(path, out digest, budget, ct))
             {
-                // Include cache hashing and decoding in the global image I/O limit.
-                await imageSlots.WaitAsync(token);
+                string part = Path.ChangeExtension(path, ".part");
                 try
                 {
-                    string digest;
-                    if (o.Force || !TryGetDigest(path, out digest, budget, token))
+                    await using (var stream = File.Create(part))
                     {
-                        string part = Path.ChangeExtension(path, ".part");
-                        try
-                        {
-                            await using (var stream = File.Create(part))
-                            {
-                                digest = await client.Transfer(url, chapter.Url, stream, token, calculateHash: true) ?? throw new InvalidDataException("Missing image hash.");
-                            }
-                            ValidateImage(part, budget, token);
-                            File.Move(part, path, true);
-                            AtomicText(Path.ChangeExtension(path, ".verified"), CheckVersion + "\n" + digest);
-                        }
-                        finally
-                        {
-                            File.Delete(part);
-                        }
+                        digest = await client.Transfer(url, chapter.Url, stream, ct, calculateHash: true) ?? throw new InvalidDataException("Missing image hash.");
                     }
-
-                    paths[i] = path;
-                    digests[i] = digest;
-                    Log($"{chapter.Title}: completed {Interlocked.Increment(ref completed)}/{urls.Count} (image {i + 1})");
+                    ValidateImage(part, budget, ct);
+                    File.Move(part, path, true);
+                    AtomicText(Path.ChangeExtension(path, ".verified"), CheckVersion + "\n" + digest);
                 }
                 finally
                 {
-                    imageSlots.Release();
+                    File.Delete(part);
                 }
             }
-            catch (Exception e) when (e is not OperationCanceledException)
-            {
-                throw new IOException($"Image {i + 1}/{urls.Count} ({url}): {e.Message}", e);
-            }
-        });
-        return (paths, digests);
+
+            return (path, digest);
+        }
+        catch (Exception e) when (e is not OperationCanceledException)
+        {
+            throw new IOException($"Image {index + 1} ({url}): {e.Message}", e);
+        }
     }
 
     // Reject partial decodes instead of accepting an image header or incomplete pixels.

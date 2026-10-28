@@ -14,7 +14,7 @@ internal static class CommandHelp
           --oldest-first         Ascending chapter number (default)
           --newest-first         Descending chapter number
           --workers N            Global concurrent image downloads (8)
-          --chapter-workers N    Concurrent chapters downloading images (2)
+          --chapter-workers N    Concurrent chapter discovery requests (2); 1 waits per chapter
           --pdf-workers N        Concurrent PDF workers (2)
           --memory-limit-mib N   Shared image working-memory budget (512 MiB)
           --timeout SECONDS      Total timeout per transfer attempt (60)

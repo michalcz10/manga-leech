@@ -22,6 +22,7 @@ internal sealed class LocalServer : IAsyncDisposable
     public bool FailChapter { get; set; }
     public bool RateLimitOnce { get; set; }
     public int ImageDelay { get; set; } = 40;
+    public bool StallFirstTailImages { get; set; }
     public string Url { get; }
     private readonly byte[] image;
 
@@ -139,7 +140,8 @@ internal sealed class LocalServer : IAsyncDisposable
                         if (!headers.TryGetValue("Referer", out string? referer) || referer != $"{Url}/chapters/{chapter}")
                             WrongReferer = true;
                     }
-                    try { await Task.Delay(ImageDelay, stop.Token); }
+                    int delay = StallFirstTailImages && hit == 1 && path.EndsWith("/3") && (chapter is "1" or "2") ? 500 : ImageDelay;
+                    try { await Task.Delay(delay, stop.Token); }
                     finally
                     {
                         lock (gate)

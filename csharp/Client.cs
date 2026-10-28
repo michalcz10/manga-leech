@@ -102,9 +102,11 @@ sealed class Client : IDisposable
             }
             catch (Exception e) when ((e is HttpRequestException h && h.StatusCode == null) || e is IOException || (e is OperationCanceledException && !ct.IsCancellationRequested))
             {
+                string reason = e is OperationCanceledException && timeout.IsCancellationRequested
+                    ? $"request timed out after {options.Timeout:F1} s" : e.Message;
                 if (attempt == 2)
-                    throw new IOException($"Transfer failed ({url}): {e.Message}", e);
-                Log($"Transfer error {url}, attempt {attempt + 1}/3: {e.Message}");
+                    throw new IOException($"Transfer failed ({url}): {reason}", e);
+                Log($"Transfer error {url}, attempt {attempt + 1}/3: {reason}");
                 await Pause(backoff, ct);
             }
         }
